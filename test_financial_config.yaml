@@ -1,0 +1,44 @@
+asset_mapping:
+  AAPL:
+  - 0
+  - 0
+  BAC:
+  - 1
+  - 1
+  CVX:
+  - 2
+  - 3
+  DXY:
+  - 3
+  - 1
+  GOOGL:
+  - 0
+  - 2
+  GS:
+  - 1
+  - 2
+  JNJ:
+  - 2
+  - 0
+  JPM:
+  - 1
+  - 0
+  MSFT:
+  - 0
+  - 1
+  NVDA:
+  - 0
+  - 3
+  PFE:
+  - 2
+  - 1
+  VIX:
+  - 3
+  - 0
+  XOM:
+  - 2
+  - 2
+feature_bounds:
+- -1.0
+- 1.0
+window_size: 10

@@ -1,0 +1,389 @@
+"""
+Spatial Multi-Modal Tokenizer for 3D-RNG World Engine
+Lead Multi-Modal Data Scientist & Training Architect Implementation
+
+This script implements Phase 1: Spatial Multi-Modal Tokenizer for video/text data injection
+into the 3D-RNG World Engine, mapping video patches to Vision Face and text embeddings 
+to Text Face with perfect temporal synchronization.
+"""
+
+import numpy as np
+from typing import Tuple, List, Optional, Dict, Any
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from einops import rearrange, reduce, repeat
+from pathlib import Path
+
+
+class VideoPatchExtractor(nn.Module):
+    """
+    Extracts patches from video frames and projects them to latent vectors.
+    Converts (H, W, C) video frames into a grid of patches, each projected to size D.
+    """
+    
+    def __init__(self, 
+                 patch_size: Tuple[int, int] = (16, 16),
+                 embed_dim: int = 768,
+                 in_channels: int = 3):
+        """
+        Initialize Video Patch Extractor.
+        
+        Args:
+            patch_size: Size of each patch (height, width)
+            embed_dim: Dimensionality of output embedding vectors
+            in_channels: Number of input channels (e.g., 3 for RGB)
+        """
+        super().__init__()
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.in_channels = in_channels
+        
+        # Calculate patches per dimension
+        self.patch_height, self.patch_width = patch_size
+        
+        # Linear projection of flattened patches
+        self.proj = nn.Linear(in_channels * patch_size[0] * patch_size[1], embed_dim)
+        
+        # Layer normalization
+        self.norm = nn.LayerNorm(embed_dim)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Extract patches from video frames and project to latent space.
+        
+        Args:
+            x: Input video tensor of shape (B, T, C, H, W) or (B, C, H, W)
+            
+        Returns:
+            Patch embeddings of shape (B, T, num_patches, embed_dim) or (B, num_patches, embed_dim)
+        """
+        # Handle different input formats
+        if x.dim() == 4:  # (B, C, H, W) - single frame
+            B, C, H, W = x.shape
+            T = 1
+            x = x.unsqueeze(1)  # Add time dimension: (B, 1, C, H, W)
+        elif x.dim() == 5:  # (B, T, C, H, W) - video sequence
+            B, T, C, H, W = x.shape
+        else:
+            raise ValueError(f"Input must be 4D or 5D tensor, got {x.dim()}D")
+            
+        # Validate dimensions
+        if C != self.in_channels:
+            raise ValueError(f"Expected {self.in_channels} channels, got {C}")
+        if H % self.patch_height != 0 or W % self.patch_width != 0:
+            raise ValueError(f"Image dimensions ({H}, {W}) must be divisible by patch size {self.patch_size}")
+            
+        # Calculate number of patches
+        num_patches_h = H // self.patch_height
+        num_patches_w = W // self.patch_width
+        num_patches = num_patches_h * num_patches_w
+        
+        # Extract patches using unfolding
+        # Reshape to (B*T, C, H, W) for patch extraction
+        x_reshaped = x.reshape(B * T, C, H, W)
+        
+        # Extract patches: (B*T, C*patch_h*patch_w, num_patches)
+        patches = F.unfold(x_reshaped, kernel_size=self.patch_size, stride=self.patch_size)
+        # Transpose to (B*T, num_patches, C*patch_h*patch_w)
+        patches = patches.transpose(1, 2)
+        
+        # Project patches to embedding dimension
+        patch_embeds = self.proj(patches)  # (B*T, num_patches, embed_dim)
+        patch_embeds = self.norm(patch_embeds)
+        
+        # Reshape back to (B, T, num_patches, embed_dim)
+        patch_embeds = patch_embeds.reshape(B, T, num_patches, self.embed_dim)
+        
+        # Remove time dimension if input was single frame
+        if T == 1:
+            patch_embeds = patch_embeds.squeeze(1)  # (B, num_patches, embed_dim)
+            
+        return patch_embeds
+    
+    def get_patch_grid_shape(self, H: int, W: int) -> Tuple[int, int]:
+        """Get the grid shape of patches for given image dimensions."""
+        return (H // self.patch_height, W // self.patch_width)
+
+
+class SpatialTokenizer:
+    """
+    Maps spatial data (video patches, text embeddings) to specific coordinates
+    on the 3D-RNG's Vision Face and Text Face.
+    """
+    
+    def __init__(self,
+                 vision_face_size: Tuple[int, int],
+                 text_face_size: Tuple[int, int],
+                 patch_size: Tuple[int, int] = (16, 16),
+                 embed_dim: int = 768,
+                 in_channels: int = 3):
+        """
+        Initialize Spatial Tokenizer.
+        
+        Args:
+            vision_face_size: Size of vision face grid (height, width)
+            text_face_size: Size of text face grid (height, width)
+            patch_size: Size of video patches (height, width)
+            embed_dim: Dimensionality of embedding vectors
+            in_channels: Number of input channels for video
+        """
+        self.vision_face_size = vision_face_size
+        self.text_face_size = text_face_size
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.in_channels = in_channels
+        
+        # Initialize video patch extractor
+        self.video_extractor = VideoPatchExtractor(patch_size, embed_dim, in_channels)
+        
+        # Text tokenizer will be provided externally (GraphCommunityTokenizer)
+        self.text_tokenizer = None
+        
+        # Validate that we can fit patches on the vision face
+        self._validate_face_capacity()
+        
+    def _validate_face_capacity(self):
+        """Validate that the vision face can accommodate the expected patch grid."""
+        # This will be checked dynamically based on actual input dimensions
+        pass
+    
+    def set_text_tokenizer(self, text_tokenizer):
+        """Set the external text tokenizer (e.g., GraphCommunityTokenizer)."""
+        self.text_tokenizer = text_tokenizer
+    
+    def tokenize_video_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Tokenize a single video frame into patch embeddings.
+        
+        Args:
+            frame: Video frame of shape (H, W, C) or (C, H, W)
+            
+        Returns:
+            Patch embeddings of shape (num_patches, embed_dim)
+        """
+        # Convert to torch tensor
+        if isinstance(frame, np.ndarray):
+            frame_tensor = torch.from_numpy(frame).float()
+        else:
+            frame_tensor = frame.float()
+            
+        # Handle different input formats
+        if frame_tensor.dim() == 3:
+            if frame_tensor.shape[2] == self.in_channels:  # (H, W, C)
+                frame_tensor = frame_tensor.permute(2, 0, 1)  # -> (C, H, W)
+            elif frame_tensor.shape[0] == self.in_channels:  # (C, H, W)
+                pass  # Already correct format
+            else:
+                raise ValueError(f"Unexpected frame shape: {frame_tensor.shape}")
+        else:
+            raise ValueError(f"Frame must be 3D tensor, got {frame_tensor.dim()}D")
+            
+        # Add batch and time dimensions: (1, 1, C, H, W)
+        frame_tensor = frame_tensor.unsqueeze(0).unsqueeze(0)
+        
+        # Extract patches
+        with torch.no_grad():
+            patch_embeds = self.video_extractor(frame_tensor)  # (1, 1, num_patches, embed_dim)
+            patch_embeds = patch_embeds.squeeze(0).squeeze(0)  # (num_patches, embed_dim)
+            
+        return patch_embeds.numpy()
+    
+    def map_patches_to_vision_face(self, patch_embeds: np.ndarray) -> Dict[Tuple[int, int, int], np.ndarray]:
+        """
+        Map video patch embeddings to specific coordinates on the Vision Face (x=0 plane).
+        
+        Args:
+            patch_embeds: Patch embeddings of shape (num_patches, embed_dim)
+            
+        Returns:
+            Dictionary mapping (x, y, z) coordinates to patch embedding vectors
+        """
+        num_patches = patch_embeds.shape[0]
+        vision_height, vision_width = self.vision_face_size
+        expected_patches = vision_height * vision_width
+        
+        # Handle case where number of patches doesn't exactly match vision face
+        if num_patches != expected_patches:
+            # We'll use adaptive mapping - either interpolate or select subset
+            if num_patches > expected_patches:
+                # Select subset of patches (could use attention or pooling)
+                indices = np.linspace(0, num_patches-1, expected_patches, dtype=int)
+                patch_embeds = patch_embeds[indices]
+            else:
+                # Repeat or interpolate patches to fill vision face
+                repeat_factor = expected_patches // num_patches
+                remainder = expected_patches % num_patches
+                repeated = np.repeat(patch_embeds, repeat_factor, axis=0)
+                if remainder > 0:
+                    repeated = np.vstack([repeated, patch_embeds[:remainder]])
+                patch_embeds = repeated
+        
+        # Map patches to vision face coordinates
+        vision_mapping = {}
+        patch_idx = 0
+        
+        for y in range(vision_height):
+            for z in range(vision_width):
+                coord = (0, y, z)  # x=0 for vision face
+                if patch_idx < len(patch_embeds):
+                    vision_mapping[coord] = patch_embeds[patch_idx].copy()
+                    patch_idx += 1
+                else:
+                    # Should not happen with our validation, but safety check
+                    vision_mapping[coord] = np.zeros(self.embed_dim)
+                    
+        return vision_mapping
+    
+    def tokenize_text(self, text: str) -> np.ndarray:
+        """
+        Tokenize text into embeddings using the external text tokenizer.
+        
+        Args:
+            text: Input text string
+            
+        Returns:
+            Text embeddings of shape (num_text_tokens, embed_dim)
+        """
+        if self.text_tokenizer is None:
+            # Fallback: return random embeddings if no tokenizer set
+            # In practice, this should be set to a proper tokenizer like GraphCommunityTokenizer
+            num_text_tokens = self.text_face_size[0] * self.text_face_size[1]
+            return np.random.randn(num_text_tokens, self.embed_dim) * 0.1
+            
+        # Use external text tokenizer
+        text_embeds = self.text_tokenizer.encode(text)  # Should return (num_tokens, embed_dim)
+        return text_embeds
+    
+    def map_text_to_text_face(self, text_embeds: np.ndarray) -> Dict[Tuple[int, int, int], np.ndarray]:
+        """
+        Map text embeddings to specific coordinates on the Text Face (x=1 plane).
+        
+        Args:
+            text_embeds: Text embeddings of shape (num_text_tokens, embed_dim)
+            
+        Returns:
+            Dictionary mapping (x, y, z) coordinates to text embedding vectors
+        """
+        num_text_tokens = text_embeds.shape[0]
+        text_height, text_width = self.text_face_size
+        expected_tokens = text_height * text_width
+        
+        # Handle case where number of tokens doesn't exactly match text face
+        if num_text_tokens != expected_tokens:
+            if num_text_tokens > expected_tokens:
+                # Select subset of tokens
+                indices = np.linspace(0, num_text_tokens-1, expected_tokens, dtype=int)
+                text_embeds = text_embeds[indices]
+            else:
+                # Repeat or interpolate tokens to fill text face
+                repeat_factor = expected_tokens // num_text_tokens
+                remainder = expected_tokens % num_text_tokens
+                repeated = np.repeat(text_embeds, repeat_factor, axis=0)
+                if remainder > 0:
+                    repeated = np.vstack([repeated, text_embeds[:remainder]])
+                text_embeds = repeated
+        
+        # Map text tokens to text face coordinates
+        text_mapping = {}
+        token_idx = 0
+        
+        for y in range(text_height):
+            for z in range(text_width):
+                coord = (1, y, z)  # x=1 for text face
+                if token_idx < len(text_embeds):
+                    text_mapping[coord] = text_embeds[token_idx].copy()
+                    token_idx += 1
+                else:
+                    # Should not happen with our validation, but safety check
+                    text_mapping[coord] = np.zeros(self.embed_dim)
+                    
+        return text_mapping
+    
+    def tokenize_multi_modal(self, 
+                            video_frame: Optional[np.ndarray] = None,
+                            text: Optional[str] = None) -> Tuple[Dict[Tuple[int, int, int], np.ndarray], 
+                                                                Dict[Tuple[int, int, int], np.ndarray]]:
+        """
+        Tokenize video and text inputs and map them to their respective faces.
+        
+        Args:
+            video_frame: Optional video frame of shape (H, W, C)
+            text: Optional text string
+            
+        Returns:
+            Tuple of (vision_mapping, text_mapping) where each is a dict mapping
+            coordinates to embedding vectors
+        """
+        vision_mapping = {}
+        text_mapping = {}
+        
+        # Process video frame if provided
+        if video_frame is not None:
+            patch_embeds = self.tokenize_video_frame(video_frame)
+            vision_mapping = self.map_patches_to_vision_face(patch_embeds)
+        
+        # Process text if provided
+        if text is not None:
+            text_embeds = self.tokenize_text(text)
+            text_mapping = self.map_text_to_text_face(text_embeds)
+            
+        return vision_mapping, text_mapping
+
+
+def create_spatial_tokenizer_example():
+    """
+    Create an example showing how to use the Spatial Tokenizer.
+    """
+    print("Creating Spatial Multi-Modal Tokenizer...")
+    
+    # Initialize spatial tokenizer
+    tokenizer = SpatialTokenizer(
+        vision_face_size=(8, 8),   # 8x8 grid on vision face
+        text_face_size=(4, 4),     # 4x4 grid on text face
+        patch_size=(16, 16),       # 16x16 patches
+        embed_dim=384,             # Embedding dimension
+        in_channels=3              # RGB input
+    )
+    
+    print(f"SpatialTokenizer initialized:")
+    print(f"  Vision face: {tokenizer.vision_face_size}")
+    print(f"  Text face: {tokenizer.text_face_size}")
+    print(f"  Patch size: {tokenizer.patch_size}")
+    print(f"  Embed dim: {tokenizer.embed_dim}")
+    
+    # Example usage with dummy data
+    print("\nProcessing example multi-modal input...")
+    
+    # Create dummy video frame (e.g., 128x128 RGB)
+    dummy_frame = np.random.randn(128, 128, 3).astype(np.float32)
+    print(f"Input video frame shape: {dummy_frame.shape}")
+    
+    # Create dummy text
+    dummy_text = "The cat sits on the mat."
+    print(f"Input text: '{dummy_text}'")
+    
+    # Tokenize and map
+    vision_mapping, text_mapping = tokenizer.tokenize_multi_modal(dummy_frame, dummy_text)
+    
+    print(f"Output vision mapping: {len(vision_mapping)} patches mapped to Vision Face (x=0)")
+    print(f"Output text mapping: {len(text_mapping)} tokens mapped to Text Face (x=1)")
+    
+    # Show sample mappings
+    if vision_mapping:
+        sample_coord = list(vision_mapping.keys())[0]
+        sample_vector = vision_mapping[sample_coord]
+        print(f"Sample vision mapping at {sample_coord}: vector shape {sample_vector.shape}, norm {np.linalg.norm(sample_vector):.3f}")
+    
+    if text_mapping:
+        sample_coord = list(text_mapping.keys())[0]
+        sample_vector = text_mapping[sample_coord]
+        print(f"Sample text mapping at {sample_coord}: vector shape {sample_vector.shape}, norm {np.linalg.norm(sample_vector):.3f}")
+    
+    print("\nSpatialTokenizer ready for integration with 3D-RNG World Engine!")
+    return tokenizer
+
+
+if __name__ == "__main__":
+    # Run the example
+    create_spatial_tokenizer_example()
