@@ -15,6 +15,14 @@ from typing import Tuple, List, Dict, Optional, Set
 from collections import defaultdict
 import itertools
 
+# Import Sparse MoE layer
+try:
+    from core.moe_layer import SparseMoE
+    MOE_AVAILABLE = True
+except ImportError:
+    MOE_AVAILABLE = False
+    print("Warning: MoE layer not available.")
+
 
 class RMSNorm(nn.Module):
     """
@@ -213,7 +221,7 @@ class BlockAttentionResiduals(nn.Module):
         return output
 
 
-class BlockAttentionPredictiveCodingNode:
+class BlockAttentionPredictiveCodingNode(PredictiveCodingNode):
     """
     Predictive Coding Node with Block Attention Residuals.
     
@@ -235,24 +243,10 @@ class BlockAttentionPredictiveCodingNode:
             learning_rate: Learning rate for connection weight updates
             num_blocks: Number of blocks for attention partitioning
         """
-        self.coordinates = coordinates
-        self.hidden_size = hidden_size
-        self.leak_rate = leak_rate
-        self.learning_rate = learning_rate
+        # Initialize parent class
+        super().__init__(coordinates, hidden_size, leak_rate, learning_rate)
+        
         self.num_blocks = num_blocks
-        
-        # Continuous latent state
-        self.hidden_state = np.zeros(hidden_size)
-        self.bias = np.random.randn(hidden_size) * 0.1
-        self.refractory_counter = 0
-        
-        # Predictive coding components
-        self.predicted_neighbor_states = {}
-        self.prediction_errors = {}
-        self.connection_weights = {}
-        
-        # Initialize neighbor connections
-        self.neighbors = []
         
         # Learned pseudo-query vector w_l ∈ ℝ^d
         # Random initialization, will be learned during training
@@ -533,6 +527,7 @@ class PredictiveCodingWorldCore:
     """
     3D World Core implementing Local Predictive Coding.
     Replaces global reinforcement with localized self-supervised prediction.
+    Now with Sparse MoE and Block Attention Residuals for dynamic depth routing.
     """
     
     def __init__(self, dim_x: int, dim_y: int, dim_z: int, hidden_size: int,
@@ -540,7 +535,11 @@ class PredictiveCodingWorldCore:
                  learning_rate: float = 0.01,
                  vision_face_size: Tuple[int, int] = (4, 4),
                  text_face_size: Tuple[int, int] = (2, 2),
-                 action_zone_size: Tuple[int, int] = (2, 2)):
+                 action_zone_size: Tuple[int, int] = (2, 2),
+                 use_moe: bool = True,
+                 num_experts: int = 8,
+                 moe_k: int = 2,
+                 num_blocks: int = 8):
         """
         Initialize the Predictive Coding World Core.
         
@@ -552,11 +551,21 @@ class PredictiveCodingWorldCore:
             vision_face_size: Size of vision input face grid
             text_face_size: Size of text input face grid
             action_zone_size: Size of action injection zone
+            use_moe: Enable Sparse Mixture of Experts
+            num_experts: Number of expert networks
+            moe_k: Top-k experts to route to
+            num_blocks: Number of blocks for Block Attention Residuals
         """
         self.dimensions = (dim_x, dim_y, dim_z)
         self.hidden_size = hidden_size
         self.leak_rate = leak_rate
         self.learning_rate = learning_rate
+        
+        # Sparse MoE Configuration
+        self.use_moe = use_moe and MOE_AVAILABLE
+        self.num_experts = num_experts
+        self.moe_k = moe_k
+        self.num_blocks = num_blocks
         
         # Define multi-modal injection zones
         self.vision_face_size = vision_face_size
@@ -571,12 +580,14 @@ class PredictiveCodingWorldCore:
         if action_zone_size[0] > dim_y or action_zone_size[1] > dim_z:
             raise ValueError("Action zone size exceeds Y-Z dimensions")
         
-        # Create 3D grid of predictive coding nodes
-        self.nodes: Dict[Tuple[int, int, int], PredictiveCodingNode] = {}
+        # Create 3D grid of Block Attention Predictive Coding nodes
+        self.nodes: Dict[Tuple[int, int, int], BlockAttentionPredictiveCodingNode] = {}
         for x in range(dim_x):
             for y in range(dim_y):
                 for z in range(dim_z):
-                    node = PredictiveCodingNode((x, y, z), hidden_size, leak_rate, learning_rate)
+                    node = BlockAttentionPredictiveCodingNode(
+                        (x, y, z), hidden_size, leak_rate, learning_rate, num_blocks
+                    )
                     self.nodes[(x, y, z)] = node
         
         # Establish neighbor connections (6-connected grid)
@@ -585,6 +596,24 @@ class PredictiveCodingWorldCore:
         # Shared weight matrix for all nodes (W_shared)
         limit = np.sqrt(6.0 / (hidden_size + hidden_size))
         self.shared_weights = np.random.uniform(-limit, limit, (hidden_size, hidden_size))
+        
+        # Initialize MoE layer
+        if self.use_moe:
+            self.moe_layer = SparseMoE(
+                hidden_size=hidden_size,
+                num_experts=num_experts,
+                k=moe_k,
+                intermediate_size=hidden_size * 4,
+                dropout=0.1,
+                noise_std=1.0,
+                capacity_factor=1.25,
+                eval_capacity_factor=2.0
+            )
+            self.moe_layer.eval()
+            print(f"  PredictiveCodingWorldCore MoE: Enabled ({num_experts} experts, k={moe_k})")
+        else:
+            self.moe_layer = None
+            print(f"  PredictiveCodingWorldCore MoE: Disabled")
         
         # Define multi-modal injection zones
         # Vision face: x=0 plane (visual input)
@@ -757,6 +786,24 @@ class PredictiveCodingWorldCore:
             
             # Update node state with continuous dynamics
             node.update_state_continuous(incoming_state, self.shared_weights, activation='tanh')
+        
+        # --- SPARSE MoE DYNAMIC ROUTING ---
+        if hasattr(self, 'moe_layer') and self.moe_layer is not None:
+            # Gather states and convert to PyTorch
+            node_coords = list(self.nodes.keys())
+            states_np = np.array([self.nodes[c].hidden_state for c in node_coords])
+            states_pt = torch.from_numpy(states_np).float().unsqueeze(1)  # Add seq dim
+            
+            # Route through MoE experts
+            with torch.no_grad():
+                moe_out = self.moe_layer(states_pt).squeeze(1).numpy()
+            
+            # Update states and store block representations
+            for i, coord in enumerate(node_coords):
+                self.nodes[coord].hidden_state = moe_out[i]
+                # Store representation for block attention history
+                self.nodes[coord].store_block_representation(moe_out[i])
+        # --- END MoE ROUTING ---
         
         # --- ACTIVE ENGINE: HARD-ZERO SPATIAL OVERRIDE (NUMPY) ---
         # 1. Extract all hidden states and their magnitudes

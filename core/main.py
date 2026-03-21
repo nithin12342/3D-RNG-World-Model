@@ -308,7 +308,11 @@ def main():
             learning_rate=0.01,
             vision_face_size=VISION_FACE_SIZE,
             text_face_size=TEXT_FACE_SIZE,
-            action_zone_size=ACTION_ZONE_SIZE
+            action_zone_size=ACTION_ZONE_SIZE,
+            use_moe=USE_MOE,
+            num_experts=NUM_EXPERTS,
+            moe_k=MOE_K,
+            num_blocks=NUM_BLOCKS
         )
         
         # Option 2: Use the basic world core (continuous latent)
