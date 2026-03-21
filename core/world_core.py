@@ -13,6 +13,14 @@ from typing import Tuple, List, Dict, Optional, Set
 from collections import defaultdict
 import itertools
 
+# Import Sparse MoE layer
+try:
+    from core.moe_layer import SparseMoE, BlockSparseMoE, create_moe_layer
+    MOE_AVAILABLE = True
+except ImportError:
+    MOE_AVAILABLE = False
+    print("Warning: MoE layer not available. Using standard dense updates.")
+
 
 class WorldNode:
     """
@@ -146,13 +154,19 @@ class WorldCore3D:
     - Designated multi-modal injection zones (Vision_Face, Text_Face, Action_Zone)
     - Local predictive coding mechanism replacing global reinforcement
     - Persistent hidden states that evolve smoothly over time
+    - Sparse Mixture of Experts (MoE) for dynamic routing
+    - Block Attention Residuals for learned depth mixture
     """
     
     def __init__(self, dim_x: int, dim_y: int, dim_z: int, hidden_size: int,
                  leak_rate: float = 0.1,
                  vision_face_size: Tuple[int, int] = (4, 4),
                  text_face_size: Tuple[int, int] = (2, 2),
-                 action_zone_size: Tuple[int, int] = (2, 2)):
+                 action_zone_size: Tuple[int, int] = (2, 2),
+                 use_moe: bool = True,
+                 num_experts: int = 8,
+                 moe_k: int = 2,
+                 num_blocks: int = 8):
         """
         Initialize the 3D World Core with continuous dynamics and multi-modal zones.
         
@@ -196,6 +210,30 @@ class WorldCore3D:
         # Shared weight matrix for all nodes (W_shared)
         limit = np.sqrt(6.0 / (hidden_size + hidden_size))
         self.shared_weights = np.random.uniform(-limit, limit, (hidden_size, hidden_size))
+        
+        # Sparse Mixture of Experts (MoE) configuration
+        self.use_moe = use_moe and MOE_AVAILABLE
+        self.num_experts = num_experts
+        self.moe_k = moe_k
+        self.num_blocks = num_blocks
+        
+        # Initialize MoE layer if available
+        if self.use_moe:
+            self.moe_layer = SparseMoE(
+                hidden_size=hidden_size,
+                num_experts=num_experts,
+                k=moe_k,
+                intermediate_size=hidden_size * 4,
+                dropout=0.1,
+                noise_std=1.0,
+                capacity_factor=1.25,
+                eval_capacity_factor=2.0
+            )
+            self.moe_layer.eval()  # Set to eval mode for inference
+            print(f"  MoE: Enabled ({num_experts} experts, k={moe_k})")
+        else:
+            self.moe_layer = None
+            print(f"  MoE: Disabled")
         
         # Define multi-modal injection zones
         # Vision face: x=0 plane (visual input)
@@ -303,6 +341,39 @@ class WorldCore3D:
                 # For injection, we directly set the hidden state (overriding leaky integrator temporarily)
                 self.nodes[node_coord].hidden_state = input_vector.copy()
     
+    def _process_with_moe(self):
+        """
+        Process all node states through the Sparse MoE layer.
+        
+        This enables dynamic routing where each node's state is processed
+        by a subset of expert networks, providing conditional computation
+        and learned depth routing (Mixture of Depths).
+        """
+        if not self.use_moe or self.moe_layer is None:
+            return
+        
+        # Collect all node states
+        node_coords = list(self.nodes.keys())
+        all_states = np.array([self.nodes[coord].hidden_state for coord in node_coords])
+        
+        # Convert to torch tensor
+        # Shape: (num_nodes, hidden_size)
+        states_tensor = torch.from_numpy(all_states).float()
+        
+        # Add sequence dimension: (num_nodes, 1, hidden_size)
+        states_tensor = states_tensor.unsqueeze(1)
+        
+        # Process through MoE layer
+        with torch.no_grad():
+            moe_output = self.moe_layer(states_tensor)
+        
+        # Convert back to numpy and squeeze sequence dimension
+        moe_output_np = moe_output.squeeze(1).numpy()
+        
+        # Update node states with MoE output
+        for i, coord in enumerate(node_coords):
+            self.nodes[coord].hidden_state = moe_output_np[i]
+    
     def tick_world(self, 
                     vision_input: Optional[np.ndarray] = None,
                     text_input: Optional[np.ndarray] = None,
@@ -320,6 +391,10 @@ class WorldCore3D:
         """
         # Step 1: Inject multi-modal inputs
         self.inject_multi_modal_input(vision_input, text_input, action_input)
+        
+        # Step 1.5: Process through MoE layer if enabled
+        if self.use_moe and self.moe_layer is not None:
+            self._process_with_moe()
         
         # Step 2: Generate predictions for all nodes (predictive coding phase)
         predictions = {}

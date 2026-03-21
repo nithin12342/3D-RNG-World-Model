@@ -268,6 +268,12 @@ def main():
     # Configuration
     WORLD_DIMENSIONS = (10, 10, 10)  # Manageable size for testing
     HIDDEN_SIZE = 32
+    
+    # Sparse MoE Configuration (for dynamic routing)
+    USE_MOE = True  # Enable Sparse Mixture of Experts
+    NUM_EXPERTS = 8  # Number of expert networks
+    MOE_K = 2  # Top-k experts to route to
+    NUM_BLOCKS = 8  # Number of blocks for Block Attention Residuals
     VISION_FACE_SIZE = (8, 8)        # 8x8 grid on vision face (x=0)
     TEXT_FACE_SIZE = (4, 4)          # 4x4 grid on text face (x=1)
     ACTION_ZONE_SIZE = (2, 2)        # 2x2 grid on action zone (x=2)
@@ -284,6 +290,8 @@ def main():
     print(f"  Patch size: {PATCH_SIZE}")
     print(f"  Embed dim: {EMBED_DIM}")
     print(f"  Training epochs: {NUM_EPOCHS}")
+    print(f"  Sparse MoE: {USE_MOE} (experts={NUM_EXPERTS}, k={MOE_K})")
+    print(f"  Block Attention Residuals: {NUM_BLOCKS} blocks")
     print()
     
     try:

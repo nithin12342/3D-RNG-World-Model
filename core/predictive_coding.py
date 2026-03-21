@@ -8,9 +8,341 @@ each node predicts its neighbors' states and updates connections based on predic
 """
 
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from typing import Tuple, List, Dict, Optional, Set
 from collections import defaultdict
 import itertools
+
+
+class RMSNorm(nn.Module):
+    """
+    Root Mean Square Layer Normalization (RMSNorm).
+    
+    From "Root Mean Square Layer Normalization" (Zhang et al., 2019).
+    Applies normalization based on RMS of activations, without centering.
+    """
+    
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        """
+        Initialize RMSNorm.
+        
+        Args:
+            hidden_size: Dimension of input
+            eps: Epsilon for numerical stability
+        """
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        # Learnable scale parameter
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply RMSNorm.
+        
+        Args:
+            x: Input tensor of shape (batch, seq_len, hidden_size)
+            
+        Returns:
+            Normalized tensor
+        """
+        # Compute RMS (Root Mean Square)
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        # Normalize
+        normalized = x / rms
+        # Scale
+        return normalized * self.weight
+
+
+class BlockAttentionResiduals(nn.Module):
+    """
+    Block Attention Residuals implementation based on arXiv:2603.15031v1.
+    
+    Key features:
+    - Partitions execution sequence into N blocks
+    - Creates block representations by summing outputs within each block
+    - Uses learned pseudo-query vectors for inter-block attention
+    - Applies RMSNorm to keys to prevent magnitude dominance
+    - Achieves O(Ld) memory efficiency vs O(L^2d) for standard attention
+    
+    Mathematical formulation:
+    - Block representation: b_n = Σ_{i∈block_n} output_i
+    - Attention: a_l = softmax(w_l · k_{0:n-1}) where w_l is learned query
+    - Output: y_l = Σ_{n} a_l[n] · v_n + input_l (residual)
+    """
+    
+    def __init__(self, hidden_size: int, num_blocks: int = 8, 
+                 num_layers: int = 4, eps: float = 1e-6):
+        """
+        Initialize Block Attention Residuals.
+        
+        Args:
+            hidden_size: Dimension of hidden states
+            num_blocks: Number of blocks to partition sequence into
+            num_layers: Number of layers with learned query vectors
+            eps: Epsilon for RMSNorm stability
+        """
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_blocks = num_blocks
+        self.num_layers = num_layers
+        self.eps = eps
+        
+        # RMSNorm for keys (prevents magnitude dominance)
+        self.key_norm = RMSNorm(hidden_size, eps)
+        
+        # Learnable pseudo-query vectors w_l ∈ ℝ^d for each layer
+        # Shape: (num_layers, hidden_size)
+        self.query_vectors = nn.Parameter(
+            torch.randn(num_layers, hidden_size) * 0.01
+        )
+        
+        # Block projection (optional: project block representations)
+        self.block_projection = nn.Linear(hidden_size, hidden_size, bias=False)
+        
+        # Output projection
+        self.output_projection = nn.Linear(hidden_size, hidden_size, bias=False)
+        
+        # Layer norm for output
+        self.layer_norm = nn.LayerNorm(hidden_size, eps=eps)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights."""
+        nn.init.xavier_uniform(self.block_projection.weight)
+        nn.init.xavier_uniform(self.output_projection.weight)
+    
+    def compute_block_representations(self, layer_outputs: torch.Tensor, 
+                                       block_size: int) -> torch.Tensor:
+        """
+        Compute block representations by summing outputs within each block.
+        
+        Args:
+            layer_outputs: Tensor of shape (batch, seq_len, hidden_size)
+            block_size: Number of elements per block
+            
+        Returns:
+            Block representations of shape (batch, num_blocks, hidden_size)
+        """
+        batch_size, seq_len, hidden_size = layer_outputs.shape
+        
+        # Pad sequence to be divisible by num_blocks
+        padded_len = ((seq_len + block_size - 1) // block_size) * block_size
+        if padded_len > seq_len:
+            padding = padded_len - seq_len
+            layer_outputs = F.pad(layer_outputs, (0, 0, 0, padding))
+        
+        # Reshape into blocks: (batch, num_blocks, block_size, hidden_size)
+        num_blocks = padded_len // block_size
+        reshaped = layer_outputs.view(batch_size, num_blocks, block_size, hidden_size)
+        
+        # Sum within each block to get block representation b_n
+        block_repr = reshaped.sum(dim=2)  # (batch, num_blocks, hidden_size)
+        
+        return block_repr
+    
+    def forward(self, inputs: torch.Tensor, layer_idx: int = 0) -> torch.Tensor:
+        """
+        Forward pass with block attention residuals.
+        
+        Args:
+            inputs: Input tensor of shape (batch, seq_len, hidden_size)
+            layer_idx: Index of current layer (0 to num_layers-1)
+            
+        Returns:
+            Output with attention-weighted block residuals added
+        """
+        batch_size, seq_len, hidden_size = inputs.shape
+        
+        # Compute block size based on sequence length and num_blocks
+        block_size = max(1, seq_len // self.num_blocks)
+        
+        # Compute block representations
+        block_repr = self.compute_block_representations(inputs, block_size)
+        
+        # Project block representations
+        keys = self.block_projection(block_repr)  # (batch, num_blocks, hidden_size)
+        values = block_repr  # Use raw block representations as values
+        
+        # Apply RMSNorm to keys (prevents magnitude dominance)
+        keys = self.key_norm(keys)
+        
+        # Get learned query vector for this layer
+        # Shape: (batch, 1, hidden_size)
+        query = self.query_vectors[layer_idx].unsqueeze(0).unsqueeze(0)
+        query = query.expand(batch_size, 1, -1)
+        
+        # Compute attention scores: a_l = softmax(w_l · k_{0:n-1})
+        # Squeeze seq_len dimension for single query
+        query = query.squeeze(1)  # (batch, hidden_size)
+        keys = keys.squeeze(1)  # (batch, hidden_size) if num_blocks=1
+        
+        if keys.dim() == 3 and keys.shape[1] > 1:
+            # Multiple blocks: compute dot products
+            # query: (batch, 1, hidden_size), keys: (batch, num_blocks, hidden_size)
+            query_expanded = query.unsqueeze(1)  # (batch, 1, hidden_size)
+            attention_scores = torch.bmm(query_expanded, keys.transpose(1, 2)).squeeze(1)  # (batch, num_blocks)
+        else:
+            # Single block case
+            attention_scores = (query * keys.squeeze(1)).sum(dim=-1)  # (batch,)
+        
+        # Softmax over blocks
+        attention_weights = F.softmax(attention_scores, dim=-1)  # (batch, num_blocks)
+        
+        # Compute attention-weighted sum of block values
+        if values.shape[1] > 1:
+            # Multiple blocks
+            attention_weights_expanded = attention_weights.unsqueeze(-1)  # (batch, num_blocks, 1)
+            attended = (values * attention_weights_expanded).sum(dim=1)  # (batch, hidden_size)
+        else:
+            # Single block
+            attended = values.squeeze(1) * attention_weights  # (batch, hidden_size)
+        
+        # Expand to sequence length
+        attended = attended.unsqueeze(1).expand(-1, seq_len, -1)  # (batch, seq_len, hidden_size)
+        
+        # Project output
+        attended = self.output_projection(attended)
+        
+        # Residual connection with input
+        output = self.layer_norm(inputs + attended)
+        
+        return output
+
+
+class BlockAttentionPredictiveCodingNode:
+    """
+    Predictive Coding Node with Block Attention Residuals.
+    
+    Extends PredictiveCodingNode with:
+    - Learned pseudo-query vector w_l for inter-block attention
+    - Block-wise attention over previous layer representations
+    """
+    
+    def __init__(self, coordinates: Tuple[int, int, int], hidden_size: int,
+                 leak_rate: float = 0.1, learning_rate: float = 0.01,
+                 num_blocks: int = 8):
+        """
+        Initialize Block Attention Predictive Coding Node.
+        
+        Args:
+            coordinates: Tuple of (x, y, z) spatial position
+            hidden_size: Dimensionality of the hidden state vector
+            leak_rate: Rate of state decay in leaky integrator
+            learning_rate: Learning rate for connection weight updates
+            num_blocks: Number of blocks for attention partitioning
+        """
+        self.coordinates = coordinates
+        self.hidden_size = hidden_size
+        self.leak_rate = leak_rate
+        self.learning_rate = learning_rate
+        self.num_blocks = num_blocks
+        
+        # Continuous latent state
+        self.hidden_state = np.zeros(hidden_size)
+        self.bias = np.random.randn(hidden_size) * 0.1
+        self.refractory_counter = 0
+        
+        # Predictive coding components
+        self.predicted_neighbor_states = {}
+        self.prediction_errors = {}
+        self.connection_weights = {}
+        
+        # Initialize neighbor connections
+        self.neighbors = []
+        
+        # Learned pseudo-query vector w_l ∈ ℝ^d
+        # Random initialization, will be learned during training
+        self.query_vector = np.random.randn(hidden_size) * 0.01
+        
+        # Block attention history (stores previous block representations)
+        self.block_history: List[np.ndarray] = []
+        self.max_block_history = num_blocks
+    
+    def update_with_block_attention(self, incoming_state: np.ndarray,
+                                    block_representations: List[np.ndarray],
+                                    shared_weights: np.ndarray,
+                                    activation: str = 'tanh') -> np.ndarray:
+        """
+        Update node state with block attention residuals.
+        
+        Computes:
+        1. Standard leaky integrator update
+        2. Block attention over previous block representations
+        3. Combines both for final state
+        
+        Args:
+            incoming_state: Input state from neighbors
+            block_representations: List of previous block representations
+            shared_weights: Global weight matrix
+            activation: Activation function
+            
+        Returns:
+            Updated hidden state
+        """
+        # Step 1: Standard leaky integrator update
+        retained_state = (1.0 - self.leak_rate) * self.hidden_state
+        weighted_input = np.dot(shared_weights, incoming_state)
+        pre_activation = weighted_input + self.bias
+        
+        if activation == 'tanh':
+            activated_state = np.tanh(pre_activation)
+        elif activation == 'relu':
+            activated_state = np.maximum(0, pre_activation)
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+        
+        innovation = self.leak_rate * activated_state
+        base_update = retained_state + innovation
+        
+        # Step 2: Block attention over previous blocks
+        if block_representations and len(block_representations) > 0:
+            # Compute attention weights: softmax(w_l · k_{0:n-1})
+            # Keys are RMS-normalized block representations
+            keys = []
+            for block_repr in block_representations:
+                # Apply RMS normalization to keys
+                rms = np.sqrt(np.mean(block_repr ** 2) + 1e-6)
+                normalized_key = block_repr / rms
+                keys.append(normalized_key)
+            
+            # Compute query-key similarities
+            query = self.query_vector
+            scores = [np.dot(query, key) for key in keys]
+            
+            # Softmax over scores
+            scores_exp = np.exp(scores - np.max(scores))  # numerical stability
+            attention_weights = scores_exp / (np.sum(scores_exp) + 1e-6)
+            
+            # Weighted sum of block values
+            attended_state = np.zeros(self.hidden_size)
+            for w, block_repr in zip(attention_weights, block_representations):
+                attended_state += w * block_repr
+            
+            # Combine base update with attended state
+            final_state = base_update + 0.1 * attended_state  # Small residual weight
+        else:
+            final_state = base_update
+        
+        self.hidden_state = final_state
+        
+        return self.hidden_state
+    
+    def store_block_representation(self, block_output: np.ndarray):
+        """
+        Store current output as a block representation for future attention.
+        
+        Args:
+            block_output: Output to store as block representation
+        """
+        self.block_history.append(block_output.copy())
+        
+        # Keep only recent blocks (limited history)
+        if len(self.block_history) > self.max_block_history:
+            self.block_history.pop(0)
 
 
 class PredictiveCodingNode:
