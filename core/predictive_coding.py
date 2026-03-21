@@ -426,6 +426,23 @@ class PredictiveCodingWorldCore:
             # Update node state with continuous dynamics
             node.update_state_continuous(incoming_state, self.shared_weights, activation='tanh')
         
+        # --- ACTIVE ENGINE: HARD-ZERO SPATIAL OVERRIDE (NUMPY) ---
+        # 1. Extract all hidden states and their magnitudes
+        all_states = np.array([node.hidden_state for node in self.nodes.values()])
+        state_mags = np.linalg.norm(all_states, axis=-1)
+        
+        # 2. Find the global 15% threshold across the flattened volume
+        k_active = max(1, int(len(state_mags) * 0.15))
+        global_thresh = np.partition(state_mags, -k_active)[-k_active]
+        
+        # 3. Enforce strict sparsity and aggressive decay
+        for node, mag in zip(self.nodes.values(), state_mags):
+            if mag < global_thresh:
+                node.hidden_state = np.zeros_like(node.hidden_state)
+            else:
+                node.hidden_state *= 0.80
+        # --- END OVERRIDE ---
+
         # Step 4: Gather actual neighbor states for error calculation
         actual_neighbor_states_dict: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], np.ndarray]] = {}
         for coord, node in self.nodes.items():

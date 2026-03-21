@@ -12,7 +12,7 @@ def test_graph_tokenizer():
     print("Testing GraphCommunityTokenizer...")
     
     try:
-        from graph_tokenizer import GraphCommunityTokenizer
+        from core.graph_tokenizer import GraphCommunityTokenizer
         
         # Create tokenizer
         tokenizer = GraphCommunityTokenizer(min_char_freq=1, min_transition_prob=0.01)
@@ -53,7 +53,7 @@ def test_parallel_graph():
     print("\nTesting ParallelNeuralGraph3D...")
     
     try:
-        from parallel_graph_impl import ParallelNeuralGraph3D
+        from core.parallel_graph_impl import ParallelNeuralGraph3D
         
         # Create graph
         graph = ParallelNeuralGraph3D(
@@ -102,7 +102,7 @@ def test_evaluator_setup():
     print("\nTesting ParallelRNGEvaluator setup...")
     
     try:
-        from parallel_eval import ParallelRNGEvaluator
+        from core.parallel_eval import ParallelRNGEvaluator
         
         # Create evaluator
         evaluator = ParallelRNGEvaluator(
@@ -135,8 +135,8 @@ def test_text_processing():
     print("\nTesting text processing pipeline...")
     
     try:
-        from parallel_eval import ParallelRNGEvaluator
-        from graph_tokenizer import GraphCommunityTokenizer
+        from core.parallel_eval import ParallelRNGEvaluator
+        from core.graph_tokenizer import GraphCommunityTokenizer
         
         # Create evaluator (which will create tokenizer)
         evaluator = ParallelRNGEvaluator(

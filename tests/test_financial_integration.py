@@ -87,7 +87,7 @@ def test_trading_harness():
     print("\nTesting TradingHarness...")
     
     try:
-        from trading_harness import TradingOutputInterpreter, calculate_sharpe_reward, calculate_sortino_reward, calculate_max_drawdown_reward, PositionSizer
+        from core.trading_harness import TradingOutputInterpreter, calculate_sharpe_reward, calculate_sortino_reward, calculate_max_drawdown_reward, PositionSizer
         
         # Test TradingOutputInterpreter
         interpreter = TradingOutputInterpreter(
@@ -211,9 +211,9 @@ def test_integration():
     print("\nTesting Financial Component Integration...")
     
     try:
-        from quant_dataloader import FinancialDataLoader
-        from trading_harness import TradingOutputInterpreter, calculate_sharpe_reward
-        from regime_monitor import RegimeMonitor
+        from core.quant_dataloader import FinancialDataLoader
+        from core.trading_harness import TradingOutputInterpreter, calculate_sharpe_reward
+        from core.regime_monitor import RegimeMonitor
         
         # Create components
         loader = FinancialDataLoader(window_size=5)

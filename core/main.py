@@ -16,11 +16,11 @@ import os
 
 # Import our 3D-RNG modules
 try:
-    from world_core import WorldCore3D
-    from predictive_coding import PredictiveCodingWorldCore
-    from spatial_tokenizer import SpatialTokenizer
-    from world_curriculum import WorldCurriculumTrainer
-    from jepa_evaluator import JEPAEvaluator
+    from core.world_core import WorldCore3D
+    from core.predictive_coding import PredictiveCodingWorldCore
+    from core.spatial_tokenizer import SpatialTokenizer
+    from core.world_curriculum import WorldCurriculumTrainer
+    from core.jepa_evaluator import JEPAEvaluator
     print("Successfully imported all 3D-RNG modules")
 except ImportError as e:
     print(f"Import error: {e}")
