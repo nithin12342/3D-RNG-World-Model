@@ -8,6 +8,7 @@ world foundation model with persistent latent states and local predictive coding
 """
 
 import numpy as np
+import torch
 from typing import Tuple, List, Dict, Optional, Set
 from collections import defaultdict
 import itertools
@@ -319,7 +320,10 @@ class WorldCore3D:
             predictions[coord] = node.predict_next_state(self.shared_weights, activation='tanh')
         
         # Step 3: Update all nodes with continuous dynamics
-        # Each node receives input from its connected neighbors
+        # First, collect all incoming signals for kWTA processing
+        all_incoming_states = []
+        all_coords = []
+        
         for coord, node in self.nodes.items():
             # Gather incoming states from connected neighbors
             incoming_states = []
@@ -347,58 +351,42 @@ class WorldCore3D:
             else:
                 incoming_state = np.zeros(self.hidden_size)
             
-            # Apply Lateral Inhibition (kWTA) - only top K% nodes survive
-            # Flatten all incoming states to compute magnitudes
-            if hasattr(self, '_last_incoming_states'):
-                # For temporal consistency, we'll store and reuse
-                pass
-            
-            # Compute magnitude of incoming state for each node
-            incoming_magnitude = np.linalg.norm(incoming_state)
-            
-            # We'll apply kWTA at the network level after computing all incoming states
-            # For now, we'll store it and apply after we have all nodes' incoming states
-            if not hasattr(self, '_incoming_states_list'):
-                self._incoming_states_list = []
-                self._incoming_magnitudes_list = []
-                self._coord_list = []
-            
-            self._incoming_states_list.append(incoming_state)
-            self._incoming_magnitudes_list.append(incoming_magnitude)
-            self._coord_list.append(coord)
-            
-            # Update node state with continuous dynamics (we'll modify this after kWTA)
-            node.update_state_continuous(incoming_state, self.shared_weights, activation='tanh')
+            all_incoming_states.append(incoming_state)
+            all_coords.append(coord)
         
-        # Apply Lateral Inhibition (kWTA) - Top K% survive
-        if hasattr(self, '_incoming_magnitudes_list') and len(self._incoming_magnitudes_list) > 0:
-            # Convert to numpy array for sorting
-            magnitudes = np.array(self._incoming_magnitudes_list)
-            # Determine threshold for top K% (e.g., 15%)
-            k_percent = 0.15  # Top 15% of nodes survive
-            threshold = np.percentile(magnitudes, 100 * (1 - k_percent))
+        # Apply Lateral Inhibition (kWTA) - Top K% survive using exact specification
+        if len(all_incoming_states) > 0:
+            # Convert to torch tensor for kWTA operation
+            incoming_signals = np.array(all_incoming_states)  # Shape: [num_nodes, hidden_size]
+            signal_mags = torch.norm(torch.from_numpy(incoming_signals).float(), dim=-1)  # Shape: [num_nodes]
             
-            # Create mask for nodes that survive
-            survival_mask = magnitudes >= threshold
+            # Define k: k_active = max(1, int(signal_mags.shape[0] * 0.15))
+            k_active = max(1, int(signal_mags.shape[0] * 0.15))
             
-            # Apply the mask: only surviving nodes keep their updated state,
-            # others get aggressively decayed toward zero
+            # Get threshold: top_k_vals, _ = torch.topk(signal_mags, k_active, dim=-1)
+            top_k_vals, _ = torch.topk(signal_mags, k_active, dim=-1)
+            threshold = top_k_vals[:, -1:]  # Shape: [num_nodes, 1] - we need the last value for each
+            
+            # Create mask: kwta_mask = (signal_mags >= top_k_vals[:, -1:]).float().unsqueeze(-1)
+            kwta_mask = (signal_mags >= threshold.squeeze(-1)).float().unsqueeze(-1)  # Shape: [num_nodes, 1]
+            
+            # Apply mask: sparse_signals = incoming_signals * kwta_mask
+            sparse_signals = incoming_signals * kwta_mask.numpy()  # Convert back to numpy
+            
+            # Update node state using the sparse signals and an aggressive decay
             for i, (coord, node) in enumerate(self.nodes.items()):
-                if survival_mask[i]:
-                    # Node survives - keep its state (already updated above)
-                    pass
-                else:
-                    # Node is suppressed - apply aggressive decay
-                    # h_t = ((1 - α) * h_{t-1} + α * 0) * decay_factor
-                    # Since we already updated with the actual input, we need to decay it
-                    decay_factor = 0.95  # Aggressive decay factor
-                    node.hidden_state *= decay_factor
+                # Get the sparse signal for this node
+                sparse_signal = sparse_signals[i]
+                
+                # Update state with continuous dynamics using sparse signals and aggressive decay
+                # h_t = ((1 - leak_rate) * h_t_prev + leak_rate * torch.tanh(sparse_signals)) * 0.95
+                # Since we're using numpy, we'll use np.tanh
+                retained_state = (1.0 - self.leak_rate) * node.hidden_state
+                innovation = self.leak_rate * np.tanh(sparse_signal)
+                new_state = (retained_state + innovation) * 0.95  # Aggressive decay factor
+                node.hidden_state = new_state
         
-        # Clear temporary storage
-        if hasattr(self, '_incoming_states_list'):
-            del self._incoming_states_list
-            del self._incoming_magnitudes_list
-            del self._coord_list
+
         
         # Step 4: Update prediction errors (compare prediction with actual)
         for coord, node in self.nodes.items():
