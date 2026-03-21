@@ -221,13 +221,14 @@ class BlockAttentionResiduals(nn.Module):
         return output
 
 
-class BlockAttentionPredictiveCodingNode(PredictiveCodingNode):
+class BlockAttentionPredictiveCodingNode:
     """
     Predictive Coding Node with Block Attention Residuals.
     
-    Extends PredictiveCodingNode with:
+    Extends functionality with:
     - Learned pseudo-query vector w_l for inter-block attention
     - Block-wise attention over previous layer representations
+    - All methods from PredictiveCodingNode
     """
     
     def __init__(self, coordinates: Tuple[int, int, int], hidden_size: int,
@@ -243,18 +244,113 @@ class BlockAttentionPredictiveCodingNode(PredictiveCodingNode):
             learning_rate: Learning rate for connection weight updates
             num_blocks: Number of blocks for attention partitioning
         """
-        # Initialize parent class
-        super().__init__(coordinates, hidden_size, leak_rate, learning_rate)
-        
+        self.coordinates = coordinates
+        self.hidden_size = hidden_size
+        self.leak_rate = leak_rate
+        self.learning_rate = learning_rate
         self.num_blocks = num_blocks
         
+        # Continuous latent state
+        self.hidden_state = np.zeros(hidden_size)
+        self.bias = np.random.randn(hidden_size) * 0.1
+        self.refractory_counter = 0
+        
+        # Predictive coding components
+        self.predicted_neighbor_states = {}
+        self.prediction_errors = {}
+        self.connection_weights = {}
+        
+        # Initialize neighbor connections
+        self.neighbors = []
+        
         # Learned pseudo-query vector w_l ∈ ℝ^d
-        # Random initialization, will be learned during training
         self.query_vector = np.random.randn(hidden_size) * 0.01
         
-        # Block attention history (stores previous block representations)
+        # Block attention history
         self.block_history: List[np.ndarray] = []
         self.max_block_history = num_blocks
+    
+    # === Methods from PredictiveCodingNode ===
+    
+    def update_state_continuous(self, incoming_state: np.ndarray, 
+                               shared_weights: np.ndarray,
+                               activation: str = 'tanh') -> np.ndarray:
+        """Apply continuous update with leaky integrator."""
+        retained_state = (1.0 - self.leak_rate) * self.hidden_state
+        weighted_input = np.dot(shared_weights, incoming_state)
+        pre_activation = weighted_input + self.bias
+        
+        if activation == 'tanh':
+            activated_state = np.tanh(pre_activation)
+        elif activation == 'relu':
+            activated_state = np.maximum(0, pre_activation)
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+            
+        innovation = self.leak_rate * activated_state
+        self.hidden_state = retained_state + innovation
+        return self.hidden_state
+    
+    def predict_neighbor_states(self, shared_weights: np.ndarray,
+                               activation: str = 'tanh') -> Dict[Tuple[int, int, int], np.ndarray]:
+        """Predict neighbor states."""
+        predictions = {}
+        for neighbor_coord in self.neighbors:
+            weighted_input = np.dot(shared_weights, self.hidden_state)
+            pre_activation = weighted_input + self.bias
+            if activation == 'tanh':
+                predicted_state = np.tanh(pre_activation)
+            elif activation == 'relu':
+                predicted_state = np.maximum(0, pre_activation)
+            else:
+                raise ValueError(f"Unsupported activation: {activation}")
+            predictions[neighbor_coord] = predicted_state
+        self.predicted_neighbor_states = predictions
+        return predictions
+    
+    def update_prediction_errors(self, actual_neighbor_states: Dict[Tuple[int, int, int], np.ndarray]):
+        """Update prediction errors."""
+        errors = {}
+        for neighbor_coord in self.neighbors:
+            if neighbor_coord in self.predicted_neighbor_states and neighbor_coord in actual_neighbor_states:
+                error = actual_neighbor_states[neighbor_coord] - self.predicted_neighbor_states[neighbor_coord]
+                errors[neighbor_coord] = error
+        self.prediction_errors = errors
+    
+    def update_connection_weights(self):
+        """Update connection weights based on prediction errors."""
+        evaporation_rate = 0.05
+        for neighbor_coord in self.neighbors:
+            if neighbor_coord in self.connection_weights:
+                self.connection_weights[neighbor_coord] *= (1.0 - evaporation_rate)
+                self.connection_weights[neighbor_coord] = max(self.connection_weights[neighbor_coord], 0.01)
+            
+            if neighbor_coord in self.prediction_errors:
+                error = self.prediction_errors[neighbor_coord]
+                error_magnitude = np.linalg.norm(error)
+                error_penalty = min(1.0, error_magnitude ** 2)
+                learning_signal = self.learning_rate * (1.0 - 2.0 * error_penalty)
+                pre_activity = self.hidden_state
+                post_activity = self.predicted_neighbor_states.get(neighbor_coord, np.zeros(self.hidden_size))
+                correlation = np.dot(pre_activity, post_activity) / (self.hidden_size)
+                if neighbor_coord in self.connection_weights:
+                    self.connection_weights[neighbor_coord] += learning_signal * correlation
+                    self.connection_weights[neighbor_coord] = np.clip(self.connection_weights[neighbor_coord], 0.01, 5.0)
+                else:
+                    self.connection_weights[neighbor_coord] = 0.01 + learning_signal * correlation
+    
+    def tick_refractory(self):
+        """Decrement refractory counter."""
+        if self.refractory_counter > 0:
+            self.refractory_counter -= 1
+    
+    def is_refractory(self) -> bool:
+        """Check if in refractory state."""
+        return self.refractory_counter > 0
+    
+    def set_refractory(self, steps: int):
+        """Set refractory period."""
+        self.refractory_counter = steps
     
     def update_with_block_attention(self, incoming_state: np.ndarray,
                                     block_representations: List[np.ndarray],
