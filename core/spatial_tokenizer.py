@@ -20,6 +20,211 @@ class VideoPatchExtractor(nn.Module):
     """
     Extracts patches from video frames and projects them to latent vectors.
     Converts (H, W, C) video frames into a grid of patches, each projected to size D.
+    For X=0 plane injection.
+    """
+
+
+class AudioFeatureExtractor(nn.Module):
+    """
+    Extracts audio features (e.g., spectrogram patches) and projects them to latent vectors.
+    Processes audio waveforms through a convolutional encoder.
+    For X=0 plane injection (coexisting with video).
+    """
+    
+    def __init__(self, embed_dim: int = 768, n_fft: int = 512, hop_length: int = 160):
+        """
+        Initialize Audio Feature Extractor.
+        
+        Args:
+            embed_dim: Dimensionality of output embedding vectors
+            n_fft: FFT size for spectrogram computation
+            hop_length: Hop length for spectrogram
+        """
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        
+        # Convolutional encoder for spectrogram patches
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(128, embed_dim, kernel_size=3, padding=1)
+        
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.norm = nn.LayerNorm(embed_dim)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Extract audio features.
+        
+        Args:
+            x: Audio tensor of shape (B, T) or (B, 1, F, T)
+            
+        Returns:
+            Audio embeddings of shape (B, embed_dim)
+        """
+        if x.dim() == 2:  # (B, T) raw waveform
+            # Compute spectrogram
+            x = torch.stft(x, n_fft=self.n_fft, hop_length=self.hop_length, 
+                         return_complex=True)
+            x = torch.abs(x).unsqueeze(1)  # (B, 1, F, T)
+        
+        # Convolutional encoding
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        
+        # Global pooling
+        x = self.pool(x).squeeze(-1).squeeze(-1)  # (B, embed_dim)
+        x = self.norm(x)
+        
+        return x
+
+
+class ImagePatchExtractor(nn.Module):
+    """
+    Extracts patches from images and projects them to latent vectors.
+    Similar to video patches but for static images.
+    For X=1 plane injection.
+    """
+    
+    def __init__(self, patch_size: Tuple[int, int] = (16, 16), embed_dim: int = 768, in_channels: int = 3):
+        """
+        Initialize Image Patch Extractor.
+        
+        Args:
+            patch_size: Size of each patch
+            embed_dim: Dimensionality of output embeddings
+            in_channels: Number of input channels
+        """
+        super().__init__()
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.in_channels = in_channels
+        
+        self.proj = nn.Linear(in_channels * patch_size[0] * patch_size[1], embed_dim)
+        self.norm = nn.LayerNorm(embed_dim)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Extract image patches.
+        
+        Args:
+            x: Image tensor of shape (B, C, H, W)
+            
+        Returns:
+            Patch embeddings of shape (B, num_patches, embed_dim)
+        """
+        B, C, H, W = x.shape
+        ph, pw = self.patch_size
+        
+        # Unfold image into patches
+        patches = F.unfold(x, kernel_size=(ph, pw), stride=(ph, pw))
+        patches = patches.transpose(1, 2)  # (B, num_patches, C*ph*pw)
+        
+        # Project and normalize
+        patch_embeds = self.proj(patches)
+        patch_embeds = self.norm(patch_embeds)
+        
+        return patch_embeds
+
+
+class TextEmbeddingExtractor(nn.Module):
+    """
+    Projects text tokens/embeddings to the latent space.
+    For X=2 plane injection.
+    """
+    
+    def __init__(self, vocab_size: int = 50000, embed_dim: int = 768, max_length: int = 512):
+        """
+        Initialize Text Embedding Extractor.
+        
+        Args:
+            vocab_size: Size of vocabulary
+            embed_dim: Dimensionality of output embeddings
+            max_length: Maximum sequence length
+        """
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.max_length = max_length
+        
+        # Token embedding
+        self.token_embed = nn.Embedding(vocab_size, embed_dim)
+        
+        # Position encoding (learnable)
+        self.pos_embed = nn.Embedding(max_length, embed_dim)
+        
+        self.norm = nn.LayerNorm(embed_dim)
+    
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Project text tokens to embeddings.
+        
+        Args:
+            token_ids: Token IDs of shape (B, L)
+            
+        Returns:
+            Text embeddings of shape (B, L, embed_dim)
+        """
+        B, L = token_ids.shape
+        
+        # Token embeddings
+        x = self.token_embed(token_ids)
+        
+        # Position embeddings
+        positions = torch.arange(L, device=token_ids.device).unsqueeze(0).expand(B, -1)
+        x = x + self.pos_embed(positions)
+        
+        x = self.norm(x)
+        return x
+
+
+class TabularFeatureExtractor(nn.Module):
+    """
+    Projects tabular data (numerical features) to latent space.
+    For X=3 plane injection.
+    """
+    
+    def __init__(self, num_features: int, embed_dim: int = 768, hidden_dim: int = 256):
+        """
+        Initialize Tabular Feature Extractor.
+        
+        Args:
+            num_features: Number of input features
+            embed_dim: Dimensionality of output embeddings
+            hidden_dim: Hidden layer dimension
+        """
+        super().__init__()
+        self.num_features = num_features
+        self.embed_dim = embed_dim
+        
+        # MLP encoder
+        self.encoder = nn.Sequential(
+            nn.Linear(num_features, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.LayerNorm(embed_dim)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Project tabular features to embeddings.
+        
+        Args:
+            x: Tabular data of shape (B, num_features)
+            
+        Returns:
+            Tabular embeddings of shape (B, embed_dim)
+        """
+        return self.encoder(x)
+
+
+class VideoPatchExtractor(nn.Module):
+    """
+    Extracts patches from video frames and projects them to latent vectors.
+    Converts (H, W, C) video frames into a grid of patches, each projected to size D.
+    For X=0 plane injection.
     """
     
     def __init__(self, 
@@ -108,8 +313,15 @@ class VideoPatchExtractor(nn.Module):
 
 class SpatialTokenizer:
     """
-    Maps spatial data (video patches, text embeddings) to specific coordinates
-    on the 3D-RNG's Vision Face and Text Face.
+    Omni-Modal Spatial Tokenizer for the 3D-RNG World Engine.
+    Maps 5 modalities (video, audio, images, text, tabular) to specific coordinates
+    on the 3D-RNG's spatial planes X=0 through X=3.
+    
+    Plane Mapping:
+    - X=0: Video and Audio (coexisting)
+    - X=1: Images
+    - X=2: Text
+    - X=3: Tabular data
     """
     
     def __init__(self,
@@ -117,16 +329,20 @@ class SpatialTokenizer:
                  text_face_size: Tuple[int, int],
                  patch_size: Tuple[int, int] = (16, 16),
                  embed_dim: int = 768,
-                 in_channels: int = 3):
+                 in_channels: int = 3,
+                 num_tabular_features: int = 10,
+                 vocab_size: int = 50000):
         """
-        Initialize Spatial Tokenizer.
+        Initialize Spatial Tokenizer with 5 modalities.
         
         Args:
-            vision_face_size: Size of vision face grid (height, width)
-            text_face_size: Size of text face grid (height, width)
-            patch_size: Size of video patches (height, width)
+            vision_face_size: Size of vision face grid (height, width) - for X=0
+            text_face_size: Size of text face grid (height, width) - for X=2
+            patch_size: Size of video/image patches (height, width)
             embed_dim: Dimensionality of embedding vectors
-            in_channels: Number of input channels for video
+            in_channels: Number of input channels for video/images
+            num_tabular_features: Number of tabular features - for X=3
+            vocab_size: Vocabulary size for text - for X=2
         """
         self.vision_face_size = vision_face_size
         self.text_face_size = text_face_size
@@ -134,14 +350,32 @@ class SpatialTokenizer:
         self.embed_dim = embed_dim
         self.in_channels = in_channels
         
-        # Initialize video patch extractor
+        # X=0: Video patches
         self.video_extractor = VideoPatchExtractor(patch_size, embed_dim, in_channels)
+        
+        # X=0: Audio features (coexisting with video)
+        self.audio_extractor = AudioFeatureExtractor(embed_dim)
+        
+        # X=1: Image patches
+        self.image_extractor = ImagePatchExtractor(patch_size, embed_dim, in_channels)
+        
+        # X=2: Text embeddings
+        self.text_extractor = TextEmbeddingExtractor(vocab_size, embed_dim)
+        
+        # X=3: Tabular features
+        self.tabular_extractor = TabularFeatureExtractor(num_tabular_features, embed_dim)
         
         # Text tokenizer will be provided externally (GraphCommunityTokenizer)
         self.text_tokenizer = None
         
         # Validate that we can fit patches on the vision face
         self._validate_face_capacity()
+        
+        print(f"SpatialTokenizer initialized with 5 modalities:")
+        print(f"  X=0: Video + Audio")
+        print(f"  X=1: Images")
+        print(f"  X=2: Text")
+        print(f"  X=3: Tabular")
         
     def _validate_face_capacity(self):
         """Validate that the vision face can accommodate the expected patch grid."""
