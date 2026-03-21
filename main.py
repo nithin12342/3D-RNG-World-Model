@@ -480,14 +480,14 @@ def main():
                 memory_cv = memory_std / memory_mean if memory_mean > 0 else 0
                 
                 print(f"\nMemory Consistency Check (epochs 100-500):")
-                 print(f"  Mean memory: {memory_mean:.1f} MB")
-                 print(f"  Std deviation: {memory_std:.1f} MB")
-                 print(f"  Coefficient of variation: {memory_cv:.3f}")
-                 
-                 if memory_cv < 0.1:  # Less than 10% variation
-                     print("  [OK] PASS: Memory footprint remains stable (O(1) scaling)")
-                 else:
-                     print("  [!] WARNING: Memory footprint shows significant variation")
+                print(f"  Mean memory: {memory_mean:.1f} MB")
+                print(f"  Std deviation: {memory_std:.1f} MB")
+                print(f"  Coefficient of variation: {memory_cv:.3f}")
+
+                if memory_cv < 0.1:  # Less than 10% variation
+                    print("  [OK] PASS: Memory footprint remains stable (O(1) scaling)")
+                else:
+                    print("  [!] WARNING: Memory footprint shows significant variation")
             
             # Save JEPA evaluation report
             jepa_evaluator.save_evaluation_report("jepa_evaluation_report.json")
