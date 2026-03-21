@@ -139,17 +139,29 @@ class PredictiveCodingNode:
         """
         Update connection weights based on prediction errors.
         Lower error = stronger connection (Hebbian-like learning).
-        Implements: w <- w + η * (1 - ||error||) * pre_post_correlation
+        Implements: w <- w * (1 - evaporation) + η * (1 - ||error||^2) * pre_post_correlation
+        Increased evaporation rate and stronger penalty for high error.
         """
+        # Increased evaporation rate for faster decay of unused paths
+        evaporation_rate = 0.05  # Base evaporation rate (increased from original 0.01 implied)
+        
         for neighbor_coord in self.neighbors:
+            # Apply evaporation to all connections (decay unused paths)
+            if neighbor_coord in self.connection_weights:
+                self.connection_weights[neighbor_coord] *= (1.0 - evaporation_rate)
+                # Ensure weight doesn't go below minimum
+                self.connection_weights[neighbor_coord] = max(self.connection_weights[neighbor_coord], 0.01)
+            
             if neighbor_coord in self.prediction_errors:
                 error = self.prediction_errors[neighbor_coord]
                 error_magnitude = np.linalg.norm(error)
                 
-                # Learning signal: inverse of error magnitude (bounded)
-                # Small error -> large positive weight update (strengthen connection)
-                # Large error -> small or negative weight update (weaken connection)
-                learning_signal = self.learning_rate * (1.0 - np.tanh(error_magnitude))
+                # Enhanced learning signal: stronger penalty for high error
+                # Use squared error for more aggressive punishment of large errors
+                # Small error -> positive weight update (strengthen connection)
+                # Large error -> strong negative weight update (weaken connection significantly)
+                error_penalty = min(1.0, error_magnitude ** 2)  # Squared error, capped at 1.0
+                learning_signal = self.learning_rate * (1.0 - 2.0 * error_penalty)  # Increased penalty factor
                 
                 # Hebbian-like update: correlation between pre (this node) and post (neighbor)
                 # In practice, we use the current hidden state as pre-synaptic activity
@@ -161,15 +173,15 @@ class PredictiveCodingNode:
                 # Outer product for weight update matrix (simplified to scalar for connection weight)
                 correlation = np.dot(pre_activity, post_activity) / (self.hidden_size)  # Normalize
                 
-                # Update weight
+                # Update weight with evaporation already applied above
                 if neighbor_coord in self.connection_weights:
                     self.connection_weights[neighbor_coord] += learning_signal * correlation
                     # Keep weights in reasonable bounds
                     self.connection_weights[neighbor_coord] = np.clip(
-                        self.connection_weights[neighbor_coord], 0.1, 3.0
+                        self.connection_weights[neighbor_coord], 0.01, 5.0
                     )
                 else:
-                    self.connection_weights[neighbor_coord] = 0.1 + learning_signal * correlation
+                    self.connection_weights[neighbor_coord] = 0.01 + learning_signal * correlation
     
     def tick_refractory(self):
         """Decrements the refractory counter by 1 per time step."""

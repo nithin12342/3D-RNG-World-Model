@@ -46,8 +46,8 @@ class WorldNode:
                                shared_weights: np.ndarray,
                                activation: str = 'tanh') -> np.ndarray:
         """
-        Applies continuous update with leaky integrator:
-        h_t = (1 - α) * h_{t-1} + α * activation(W_shared * incoming + b_v)
+        Applies continuous update with leaky integrator and aggressive decay:
+        h_t = ((1 - α) * h_{t-1} + α * activation(W_shared * incoming + b_v)) * decay_factor
         
         Args:
             incoming_state: Input state from connected nodes
@@ -73,8 +73,9 @@ class WorldNode:
             
         innovation = self.leak_rate * activated_state
         
-        # Update state
-        self.hidden_state = retained_state + innovation
+        # Update state with aggressive decay factor to prevent saturation
+        decay_factor = 0.95  # Aggressive decay factor to prevent signal accumulation
+        self.hidden_state = (retained_state + innovation) * decay_factor
         
         return self.hidden_state
     
@@ -295,9 +296,9 @@ class WorldCore3D:
                 self.nodes[node_coord].hidden_state = input_vector.copy()
     
     def tick_world(self, 
-                   vision_input: Optional[np.ndarray] = None,
-                   text_input: Optional[np.ndarray] = None,
-                   action_input: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
+                    vision_input: Optional[np.ndarray] = None,
+                    text_input: Optional[np.ndarray] = None,
+                    action_input: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
         """
         Advance the world core by one time step.
         
@@ -346,8 +347,58 @@ class WorldCore3D:
             else:
                 incoming_state = np.zeros(self.hidden_size)
             
-            # Update node state with continuous dynamics
+            # Apply Lateral Inhibition (kWTA) - only top K% nodes survive
+            # Flatten all incoming states to compute magnitudes
+            if hasattr(self, '_last_incoming_states'):
+                # For temporal consistency, we'll store and reuse
+                pass
+            
+            # Compute magnitude of incoming state for each node
+            incoming_magnitude = np.linalg.norm(incoming_state)
+            
+            # We'll apply kWTA at the network level after computing all incoming states
+            # For now, we'll store it and apply after we have all nodes' incoming states
+            if not hasattr(self, '_incoming_states_list'):
+                self._incoming_states_list = []
+                self._incoming_magnitudes_list = []
+                self._coord_list = []
+            
+            self._incoming_states_list.append(incoming_state)
+            self._incoming_magnitudes_list.append(incoming_magnitude)
+            self._coord_list.append(coord)
+            
+            # Update node state with continuous dynamics (we'll modify this after kWTA)
             node.update_state_continuous(incoming_state, self.shared_weights, activation='tanh')
+        
+        # Apply Lateral Inhibition (kWTA) - Top K% survive
+        if hasattr(self, '_incoming_magnitudes_list') and len(self._incoming_magnitudes_list) > 0:
+            # Convert to numpy array for sorting
+            magnitudes = np.array(self._incoming_magnitudes_list)
+            # Determine threshold for top K% (e.g., 15%)
+            k_percent = 0.15  # Top 15% of nodes survive
+            threshold = np.percentile(magnitudes, 100 * (1 - k_percent))
+            
+            # Create mask for nodes that survive
+            survival_mask = magnitudes >= threshold
+            
+            # Apply the mask: only surviving nodes keep their updated state,
+            # others get aggressively decayed toward zero
+            for i, (coord, node) in enumerate(self.nodes.items()):
+                if survival_mask[i]:
+                    # Node survives - keep its state (already updated above)
+                    pass
+                else:
+                    # Node is suppressed - apply aggressive decay
+                    # h_t = ((1 - α) * h_{t-1} + α * 0) * decay_factor
+                    # Since we already updated with the actual input, we need to decay it
+                    decay_factor = 0.95  # Aggressive decay factor
+                    node.hidden_state *= decay_factor
+        
+        # Clear temporary storage
+        if hasattr(self, '_incoming_states_list'):
+            del self._incoming_states_list
+            del self._incoming_magnitudes_list
+            del self._coord_list
         
         # Step 4: Update prediction errors (compare prediction with actual)
         for coord, node in self.nodes.items():

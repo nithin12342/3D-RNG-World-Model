@@ -315,7 +315,7 @@ def main():
         #     action_zone_size=ACTION_ZONE_SIZE
         # )
         
-        print("✓ World model initialized")
+        print("[OK] World model initialized")
         
         # Initialize spatial tokenizer
         spatial_tokenizer = SpatialTokenizer(
@@ -325,18 +325,18 @@ def main():
             embed_dim=EMBED_DIM,
             in_channels=1  # Grayscale for Moving MNIST simulation
         )
-        print("✓ Spatial tokenizer initialized")
+        print("[OK] Spatial tokenizer initialized")
         
         # Initialize world curriculum trainer
         curriculum_trainer = WorldCurriculumTrainer(
             world_model=world_model,
             spatial_tokenizer=spatial_tokenizer
         )
-        print("✓ World curriculum trainer initialized")
+        print("[OK] World curriculum trainer initialized")
         
         # Initialize JEPA evaluator
         jepa_evaluator = JEPAEvaluator(world_model)
-        print("✓ JEPA evaluator initialized")
+        print("[OK] JEPA evaluator initialized")
         
         # Initialize Moving MNIST simulator
         mnist_simulator = MovingMNISTSimulator(
@@ -344,11 +344,11 @@ def main():
             digit_size=8,
             speed=(2.0, 1.5)
         )
-        print("✓ Moving MNIST simulator initialized")
+        print("[OK] Moving MNIST simulator initialized")
         
         # Generate synthetic text stream
         text_stream = create_synthetic_text_stream(NUM_EPOCHS)
-        print("✓ Synthetic text stream generated")
+        print("[OK] Synthetic text stream generated")
         
         # Training metrics
         epoch_times = []
@@ -455,7 +455,7 @@ def main():
         
         # Final evaluation
         if validation_passed and nan_epoch is None:
-            print("✓ SUCCESS: Completed all epochs without NaN/Inf detection!")
+            print("[OK] SUCCESS: Completed all epochs without NaN/Inf detection!")
             
             # Get final statistics
             final_stats = world_model.get_world_statistics()
@@ -482,12 +482,12 @@ def main():
                 print(f"\nMemory Consistency Check (epochs 100-500):")
                 print(f"  Mean memory: {memory_mean:.1f} MB")
                 print(f"  Std deviation: {memory_std:.1f} MB")
-                print(f"  Coefficient of variation: {memory_cv:.3f}")
-                
-                if memory_cv < 0.1:  # Less than 10% variation
-                    print("  ✓ PASS: Memory footprint remains stable (O(1) scaling)")
-                else:
-                    print("  ⚠ WARNING: Memory footprint shows significant variation")
+                 print(f"  Coefficient of variation: {memory_cv:.3f}")
+                 
+                 if memory_cv < 0.1:  # Less than 10% variation
+                     print("  [OK] PASS: Memory footprint remains stable (O(1) scaling)")
+                 else:
+                     print("  [!] WARNING: Memory footprint shows significant variation")
             
             # Save JEPA evaluation report
             jepa_evaluator.save_evaluation_report("jepa_evaluation_report.json")
