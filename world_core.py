@@ -388,11 +388,33 @@ class WorldCore3D:
                 # Update state with continuous dynamics using sparse signals and aggressive decay
                 # h_t = ((1 - leak_rate) * h_t_prev + leak_rate * torch.tanh(sparse_signals)) * 0.95
                 # Since we're using numpy, we'll use np.tanh
+                # --- SPATIAL NORMALIZATION BEFORE TANH ---
+                # Divide by sqrt(hidden_size) to prevent saturation of tanh
+                normalized_signal = sparse_signal / np.sqrt(self.hidden_size)
                 retained_state = (1.0 - self.leak_rate) * node.hidden_state
-                innovation = self.leak_rate * np.tanh(sparse_signal)
+                innovation = self.leak_rate * np.tanh(normalized_signal)
                 new_state = (retained_state + innovation) * 0.95  # Aggressive decay factor
                 node.hidden_state = new_state
         
+        # --- HARD-ZERO SPATIAL OVERRIDE ---
+        # Eradicate floating-point ghosts by forcing bottom 85% to exact 0.0
+        # This ensures sparsity masks are HARD ZEROS at the end of state update
+        all_states = np.array([node.hidden_state for node in self.nodes.values()])
+        state_mags = np.linalg.norm(all_states, axis=-1)  # Shape: [num_nodes]
+        
+        # Find the absolute top 15% globally across the flattened grid
+        flat_mags = state_mags.flatten()
+        k_active = max(1, int(flat_mags.shape[0] * 0.15))
+        global_thresh = np.partition(flat_mags, -k_active)[-k_active]
+        
+        # Create the absolute binary mask (1.0 for winners, exactly 0.0 for losers)
+        hard_mask = (state_mags >= global_thresh).astype(np.float32)
+        
+        # FORCE the bottom 85% to exact 0.0
+        for i, node in enumerate(self.nodes.values()):
+            if hard_mask[i] == 0.0:
+                node.hidden_state = np.zeros_like(node.hidden_state)
+        # --- END OVERRIDE ---
 
         
         # Step 4: Update prediction errors (compare prediction with actual)
