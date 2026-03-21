@@ -61,27 +61,28 @@ class WorldNode:
         # --- ADVANCED LOGICAL ANALYZER ENFORCEMENT: STRICT kWTA & DECAY ---
         # Convert to torch tensors
         incoming_signals = torch.from_numpy(incoming_state).float()
-        shared_weights_tensor = torch.from_numpy(shared_weights).float()
-        hidden_state_tensor = torch.from_numpy(self.hidden_state).float()
-        bias_tensor = torch.from_numpy(self.bias).float()
+        hidden_states_tensor = torch.from_numpy(self.hidden_state).float()
         
-        # 1. Calculate signal magnitudes
+        # 1. Calculate signal magnitudes (removes the feature dimension)
         signal_mags = torch.norm(incoming_signals, dim=-1)
         
-        # 2. Determine 15% sparsity threshold
-        k_active = max(1, int(signal_mags.shape[0] * 0.15))
-        top_k_vals, _ = torch.topk(signal_mags, k_active, dim=-1)
-        threshold = top_k_vals[-1:]
+        # 2. Flatten the spatial volume to find the absolute global threshold
+        flat_mags = signal_mags.reshape(-1)
+        k_active = max(1, int(flat_mags.shape[0] * 0.15))  # Strictly 15% of total nodes
         
-        # 3. Generate binary mask (1.0 for winners, 0.0 for losers)
-        kwta_mask = (signal_mags >= threshold).float().unsqueeze(-1)
+        # 3. Find the global K-th strongest value
+        top_k_vals, _ = torch.topk(flat_mags, k_active)
+        global_threshold = top_k_vals[-1]  # The minimum scalar score to survive
         
-        # 4. Eradicate weak signals BEFORE activation
+        # 4. Broadcast mask back to original spatial shape and expand for features
+        kwta_mask = (signal_mags >= global_threshold).float().unsqueeze(-1)
+        
+        # 5. Eradicate weak signals globally
         sparse_signals = incoming_signals * kwta_mask
         
-        # 5. Damped Leaky Integrator Update (gamma = 0.80)
+        # 6. Damped Leaky Integrator Update
         decay_factor = 0.80
-        self.hidden_state = (((1 - self.leak_rate) * hidden_state_tensor + self.leak_rate * torch.tanh(torch.matmul(shared_weights_tensor, sparse_signals) + bias_tensor)) * decay_factor).numpy()
+        self.hidden_state = (((1 - self.leak_rate) * hidden_states_tensor + self.leak_rate * torch.tanh(sparse_signals)) * decay_factor).numpy()
         # --- END ENFORCEMENT ---
         
         return self.hidden_state
