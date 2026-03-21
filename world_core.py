@@ -500,7 +500,10 @@ class WorldCore3D:
             total_magnitude += magnitude
             total_prediction_error += error_magnitude
             
-            if magnitude > 0.1:  # Threshold for considering active
+            # --- EPSILON-SAFE METRIC OVERRIDE ---
+            # Do not count microscopic floating-point noise as an active node
+            epsilon_threshold = 1e-4
+            if magnitude > epsilon_threshold:  # Epsilon threshold for considering active
                 active_count += 1
             if node.is_refractory():
                 refractory_count += 1

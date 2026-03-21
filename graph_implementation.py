@@ -372,7 +372,10 @@ class NeuralGraph3D:
         for node in self.nodes.values():
             magnitude = np.linalg.norm(node.hidden_state)
             total_magnitude += magnitude
-            if magnitude > 0.1:  # Threshold for considering active
+            # --- EPSILON-SAFE METRIC OVERRIDE ---
+            # Do not count microscopic floating-point noise as an active node
+            epsilon_threshold = 1e-4
+            if magnitude > epsilon_threshold:  # Epsilon threshold for considering active
                 active_count += 1
                 
         activation_ratio = active_count / total_nodes if total_nodes > 0 else 0.0
