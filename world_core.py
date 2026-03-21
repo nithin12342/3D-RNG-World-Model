@@ -58,25 +58,31 @@ class WorldNode:
         Returns:
             Updated hidden state vector (h_t)
         """
-        # Leaky integrator component: retain (1-α) of previous state
-        retained_state = (1.0 - self.leak_rate) * self.hidden_state
+        # --- ADVANCED LOGICAL ANALYZER ENFORCEMENT: STRICT kWTA & DECAY ---
+        # Convert to torch tensors
+        incoming_signals = torch.from_numpy(incoming_state).float()
+        shared_weights_tensor = torch.from_numpy(shared_weights).float()
+        hidden_state_tensor = torch.from_numpy(self.hidden_state).float()
+        bias_tensor = torch.from_numpy(self.bias).float()
         
-        # Innovation component: α * activation(W_shared * incoming + b_v)
-        weighted_input = np.dot(shared_weights, incoming_state)
-        pre_activation = weighted_input + self.bias
+        # 1. Calculate signal magnitudes
+        signal_mags = torch.norm(incoming_signals, dim=-1)
         
-        if activation == 'tanh':
-            activated_state = np.tanh(pre_activation)
-        elif activation == 'relu':
-            activated_state = np.maximum(0, pre_activation)
-        else:
-            raise ValueError(f"Unsupported activation function: {activation}")
-            
-        innovation = self.leak_rate * activated_state
+        # 2. Determine 15% sparsity threshold
+        k_active = max(1, int(signal_mags.shape[0] * 0.15))
+        top_k_vals, _ = torch.topk(signal_mags, k_active, dim=-1)
+        threshold = top_k_vals[-1:]
         
-        # Update state with aggressive decay factor to prevent saturation
-        decay_factor = 0.95  # Aggressive decay factor to prevent signal accumulation
-        self.hidden_state = (retained_state + innovation) * decay_factor
+        # 3. Generate binary mask (1.0 for winners, 0.0 for losers)
+        kwta_mask = (signal_mags >= threshold).float().unsqueeze(-1)
+        
+        # 4. Eradicate weak signals BEFORE activation
+        sparse_signals = incoming_signals * kwta_mask
+        
+        # 5. Damped Leaky Integrator Update (gamma = 0.80)
+        decay_factor = 0.80
+        self.hidden_state = (((1 - self.leak_rate) * hidden_state_tensor + self.leak_rate * torch.tanh(torch.matmul(shared_weights_tensor, sparse_signals) + bias_tensor)) * decay_factor).numpy()
+        # --- END ENFORCEMENT ---
         
         return self.hidden_state
     
