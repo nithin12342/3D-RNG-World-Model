@@ -219,8 +219,13 @@ class CodeDataLoader:
             if token in self._vocab:
                 token_ids.append(self._vocab[token])
             else:
-                # Hash unknown tokens
-                token_ids.append(hash(token) % (self.vocab_size - len(self._vocab)) + len(self._vocab))
+                # Hash unknown tokens - use vocab_size as fallback to avoid division by zero
+                vocab_remaining = self.vocab_size - len(self._vocab)
+                if vocab_remaining > 0:
+                    token_ids.append(hash(token) % vocab_remaining + len(self._vocab))
+                else:
+                    # All vocabulary slots used, wrap around
+                    token_ids.append(hash(token) % self.vocab_size)
         
         # Pad or truncate to max_code_length
         if len(token_ids) < self.max_code_length:
