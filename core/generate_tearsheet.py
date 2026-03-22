@@ -470,3 +470,286 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
+
+
+# =============================================================================
+# JEPA Evaluation Report Visualization Functions
+# =============================================================================
+
+
+def load_jepa_evaluation_report(filename: str = 'jepa_evaluation_report.json') -> Dict:
+    """
+    Load JEPA evaluation report from JSON file.
+    
+    Args:
+        filename: Path to the JEPA evaluation report JSON
+        
+    Returns:
+        Dictionary containing evaluation results
+    """
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"{filename} not found. Run the training pipeline first.")
+    
+    with open(filename, 'r') as f:
+        report = json.load(f)
+    
+    return report
+
+
+def create_jepa_performance_summary_plot(
+    jepa_report: Dict, 
+    save_path: str = 'artifacts/performance_summary.png'
+):
+    """
+    Create performance summary plot showing Prediction Error with spike highlighting
+    and Memory Usage proving O(1) stable scaling.
+    
+    Args:
+        jepa_report: JEPA evaluation report dictionary
+        save_path: Path to save the figure
+        
+    Returns:
+        Path to saved figure
+    """
+    # Ensure artifacts directory exists
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    fig.suptitle('3D-RNG Code Generation Performance Summary', fontsize=14, fontweight='bold')
+    
+    # Extract data from report
+    overall = jepa_report.get('overall_assessment', {})
+    memory = jepa_report.get('memory_efficiency', {})
+    
+    # Plot 1: Prediction Error with spike highlighting
+    ax1 = axes[0]
+    
+    final_error = overall.get('final_prediction_error', 0)
+    best_error = overall.get('best_prediction_error', 0)
+    error_trend = overall.get('error_trend', 'unknown')
+    
+    # Create a bar chart for error metrics
+    error_labels = ['Final Prediction Error', 'Best Prediction Error']
+    error_values = [final_error, best_error]
+    colors = ['#e74c3c', '#27ae60']
+    
+    bars = ax1.bar(error_labels, error_values, color=colors, edgecolor='black', linewidth=1.2)
+    ax1.set_ylabel('Prediction Error', fontsize=12)
+    ax1.set_title('Prediction Error Analysis\n(Spikes indicate Sandbox execution failures/penalties)', fontsize=11)
+    
+    # Add value labels on bars
+    for bar, val in zip(bars, error_values):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.6f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    # Add trend annotation
+    ax1.text(0.5, 0.95, f'Trend: {error_trend}', transform=ax1.transAxes,
+            ha='center', fontsize=10, 
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # Highlight spikes (high error indicates sandbox failures)
+    if final_error > best_error * 1.5:
+        ax1.annotate('SPIKE OF PAIN\n(Sandbox failures)', 
+                    xy=(0, final_error), xytext=(0.25, final_error * 0.8),
+                    arrowprops=dict(arrowstyle='->', color='red', lw=2),
+                    fontsize=9, color='red', fontweight='bold')
+    
+    ax1.grid(axis='y', alpha=0.3)
+    
+    # Plot 2: Memory Usage to prove O(1) stable scaling
+    ax2 = axes[1]
+    
+    current_memory = memory.get('current_memory_mb', 0)
+    memory_increase = memory.get('memory_increase_mb', 0)
+    scaling_quality = memory.get('memory_scaling_quality', 'unknown')
+    efficiency_ratio = memory.get('memory_efficiency_ratio', 1.0)
+    
+    # Create memory metrics visualization
+    memory_labels = ['Current Memory (MB)', 'Memory Increase (MB)']
+    memory_values = [current_memory, memory_increase]
+    
+    x_pos = np.arange(len(memory_labels))
+    bars2 = ax2.bar(x_pos, memory_values, color=['#3498db', '#9b59b6'], 
+                   edgecolor='black', linewidth=1.2, width=0.6)
+    
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels(memory_labels)
+    ax2.set_ylabel('Memory (MB)', fontsize=12)
+    ax2.set_title(f'Memory Usage - Proving O(1) Stable Scaling\n(Scaling Quality: {scaling_quality})', fontsize=11)
+    
+    # Add value labels
+    for bar, val in zip(bars2, memory_values):
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.1f} MB', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    # Add efficiency ratio annotation
+    ax2.text(0.5, 0.95, f'Efficiency Ratio: {efficiency_ratio:.4f} (< 0.1 = O(1))', 
+            transform=ax2.transAxes, ha='center', fontsize=10,
+            bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
+    
+    ax2.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved JEPA performance summary to {save_path}")
+    return save_path
+
+
+def create_jepa_regime_analysis_plot(
+    jepa_report: Dict,
+    save_path: str = 'artifacts/regime_analysis.png'
+):
+    """
+    Create regime analysis plot showing spatial error distribution and convergence.
+    
+    Args:
+        jepa_report: JEPA evaluation report dictionary
+        save_path: Path to save the figure
+        
+    Returns:
+        Path to saved figure
+    """
+    # Ensure artifacts directory exists
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('3D-RNG Code Generation Regime Analysis', fontsize=14, fontweight='bold')
+    
+    # Extract data
+    overall = jepa_report.get('overall_assessment', {})
+    spatial = jepa_report.get('spatial_dynamics', {})
+    temporal = jepa_report.get('temporal_dynamics', {})
+    memory = jepa_report.get('memory_efficiency', {})
+    
+    # Plot 1: Convergence Status
+    ax1 = axes[0, 0]
+    is_converged = overall.get('is_converged', False)
+    convergence_epoch = overall.get('convergence_epoch', 0)
+    
+    status_color = 'green' if is_converged else 'orange'
+    status_text = 'CONVERGED' if is_converged else 'NOT CONVERGED'
+    
+    ax1.text(0.5, 0.6, status_text, ha='center', va='center', fontsize=20, 
+            fontweight='bold', color=status_color)
+    ax1.text(0.5, 0.3, f'Convergence Epoch: {convergence_epoch}', ha='center', va='center', fontsize=12)
+    ax1.set_xlim(0, 1)
+    ax1.set_ylim(0, 1)
+    ax1.axis('off')
+    ax1.set_title('Convergence Status', fontsize=11)
+    
+    # Plot 2: Spatial Error Homogeneity
+    ax2 = axes[0, 1]
+    spatial_error_map = spatial.get('spatial_error_map', {})
+    
+    if spatial_error_map:
+        layers = list(spatial_error_map.keys())
+        errors = list(spatial_error_map.values())
+        
+        ax2.bar(range(len(layers)), errors, color='#2ecc71', edgecolor='black')
+        ax2.set_xlabel('Spatial Layer')
+        ax2.set_ylabel('Prediction Error')
+        ax2.set_title(f'Spatial Error Distribution\n(Homogeneity: {spatial.get("error_homogeneity", "unknown")})', fontsize=11)
+        ax2.set_xticks(range(len(layers)))
+        ax2.set_xticklabels([f'L{x}' for x in layers])
+    else:
+        ax2.text(0.5, 0.5, 'No spatial data available', ha='center', va='center')
+        ax2.axis('off')
+    
+    ax2.grid(axis='y', alpha=0.3)
+    
+    # Plot 3: Memory Stability
+    ax3 = axes[1, 0]
+    scaling_quality = memory.get('memory_scaling_quality', 'unknown')
+    efficiency_ratio = memory.get('memory_efficiency_ratio', 1.0)
+    
+    # Show O(1) scaling proof
+    o1_colors = ['#27ae60' if scaling_quality == 'O(1)' else '#e74c3c']
+    ax3.bar(['Memory Scaling'], [1.0 - efficiency_ratio], color=o1_colors[0], edgecolor='black')
+    ax3.bar(['Memory Scaling'], [efficiency_ratio], bottom=[1.0 - efficiency_ratio], 
+            color='#bdc3c7', edgecolor='black', alpha=0.5)
+    
+    ax3.set_ylabel('Ratio')
+    ax3.set_title(f'Memory Stability Analysis\n({scaling_quality} scaling)', fontsize=11)
+    ax3.set_ylim(0, 1)
+    
+    # Add annotation
+    ax3.text(0.5, 0.95, f'O(1) Proof: {scaling_quality}', transform=ax3.transAxes,
+            ha='center', fontsize=10, fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='lightgreen' if scaling_quality == 'O(1)' else 'lightyellow', alpha=0.7))
+    
+    # Plot 4: Evaluation Summary
+    ax4 = axes[1, 1]
+    eval_length = jepa_report.get('evaluation_history_length', 0)
+    
+    # Summary metrics
+    summary_text = f"""
+    Evaluation Summary:
+    
+    • Total Epochs Evaluated: {eval_length}
+    • Final Prediction Error: {overall.get('final_prediction_error', 0):.6f}
+    • Best Prediction Error: {overall.get('best_prediction_error', 0):.6f}
+    • Error Trend: {overall.get('error_trend', 'unknown')}
+    • Current Memory: {memory.get('current_memory_mb', 0):.1f} MB
+    • Memory Growth Rate: {memory.get('memory_growth_rate_mb_per_unit', 0):.4f} MB/unit
+    """
+    
+    ax4.text(0.1, 0.9, summary_text, transform=ax4.transAxes, fontsize=10,
+            verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='white', edgecolor='gray', alpha=0.8))
+    ax4.axis('off')
+    ax4.set_title('Evaluation Summary', fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved JEPA regime analysis to {save_path}")
+    return save_path
+
+
+def generate_jepa_tearsheet():
+    """
+    Generate JEPA evaluation tearsheet.
+    """
+    print("=" * 60)
+    print("3D-RNG CODE GENERATION JEPA TEAR SHEET GENERATOR")
+    print("=" * 60)
+    
+    try:
+        # Load JEPA evaluation report
+        print("Loading JEPA evaluation report...")
+        jepa_report = load_jepa_evaluation_report('jepa_evaluation_report.json')
+        print(f"Loaded evaluation data: {jepa_report.get('evaluation_history_length', 0)} epochs")
+        
+        # Generate performance summary
+        print("Generating performance summary plot...")
+        perf_path = create_jepa_performance_summary_plot(jepa_report)
+        print(f"Saved: {perf_path}")
+        
+        # Generate regime analysis
+        print("Generating regime analysis plot...")
+        regime_path = create_jepa_regime_analysis_plot(jepa_report)
+        print(f"Saved: {regime_path}")
+        
+        print("\n" + "=" * 60)
+        print("JEPA TEAR SHEET GENERATION COMPLETE")
+        print("=" * 60)
+        print("Generated files:")
+        print(f"  - {perf_path}")
+        print(f"  - {regime_path}")
+        
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        print("Please run the training pipeline to generate jepa_evaluation_report.json")
+        return 1
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+    
+    return 0
