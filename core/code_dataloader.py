@@ -367,7 +367,7 @@ class CodeDataLoader:
         
         return np.array(token_ids, dtype=np.int64)
     
-    def _extract_ast_features(self, code: str) -> Tuple[np.ndarray, np.ndarray, int]:
+    def _extract_ast_graph_features(self, code: str) -> Tuple[np.ndarray, np.ndarray, int]:
         """
         Extract AST graph features from Python code.
         
@@ -534,7 +534,7 @@ class CodeDataLoader:
                 kg_features = self._ast_features_to_tensor(sample['ast_features'])
             else:
                 # Extract from source code
-                kg_features, _, depth = self._extract_ast_features(source)
+                kg_features, _, depth = self._extract_ast_graph_features(source)
             kg_tensors.append(kg_features)
             
             # Tabular modality: linter metrics
