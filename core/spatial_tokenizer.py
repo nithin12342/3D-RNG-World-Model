@@ -68,8 +68,13 @@ class AudioFeatureExtractor(nn.Module):
             x = x.unsqueeze(0)  # (1, T)
         
         if x.dim() == 2:  # (B, T) raw waveform
+            # Get input length and adapt n_fft if needed for short inputs
+            input_len = x.shape[-1]
+            n_fft = min(self.n_fft, input_len)
+            hop_length = min(self.hop_length, input_len // 4) if input_len > 4 else 1
+            
             # Compute spectrogram
-            x = torch.stft(x, n_fft=self.n_fft, hop_length=self.hop_length, 
+            x = torch.stft(x, n_fft=n_fft, hop_length=hop_length, 
                          return_complex=True)
             x = torch.abs(x).unsqueeze(1)  # (B, 1, F, T)
         
