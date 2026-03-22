@@ -60,7 +60,7 @@ class NoisyTopKGating(nn.Module):
     
     def _init_weights(self):
         """Initialize gate weights with Xavier initialization."""
-        nn.init.xavier_uniform(self.gate.weight)
+        nn.init.xavier_uniform_(self.gate.weight)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -142,8 +142,8 @@ class ExpertNetwork(nn.Module):
     
     def _init_weights(self):
         """Initialize expert weights."""
-        nn.init.xavier_uniform(self.up_proj.weight)
-        nn.init.xavier_uniform(self.down_proj.weight)
+        nn.init.xavier_uniform_(self.up_proj.weight)
+        nn.init.xavier_uniform_(self.down_proj.weight)
         nn.init.zeros_(self.down_proj.weight)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:

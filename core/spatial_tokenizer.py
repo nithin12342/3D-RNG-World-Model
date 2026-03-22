@@ -370,7 +370,7 @@ class SpatialTokenizer:
                  patch_size: Tuple[int, int] = (16, 16),
                  embed_dim: int = 768,
                  in_channels: int = 3,
-                 num_tabular_features: int = 10,
+                 num_tabular_features: int = 8,
                  vocab_size: int = 50000):
         """
         Initialize Spatial Tokenizer with 5 modalities.
