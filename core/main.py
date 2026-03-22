@@ -18,10 +18,13 @@ import os
 # Import our 3D-RNG modules
 try:
     from core.world_core import WorldCore3D
-    from core.predictive_coding import PredictiveCodingWorldCore
+    from core.predictive_coding import PredictiveCodingWorldCore, CognitiveController
     from core.spatial_tokenizer import SpatialTokenizer
     from core.world_curriculum import WorldCurriculumTrainer
     from core.jepa_evaluator import JEPAEvaluator
+    # Import neurosymbolic modules for dependency injection
+    from core.neurosymbolic_kg import NeurosymbolicKG
+    from core.agentic_sandbox import AgenticSandbox
     print("Successfully imported all 3D-RNG modules")
 except ImportError as e:
     print(f"Import error: {e}")
@@ -299,7 +302,18 @@ def main():
         # Initialize components
         print("Initializing 3D-RNG components...")
         
+        # --- DEPENDENCY INJECTION: Instantiate neurosymbolic modules FIRST ---
+        # This follows the Dependency Inversion Principle - dependencies are created
+        # externally and injected into the core, rather than being instantiated internally
+        cognitive_controller = CognitiveController(hidden_size=HIDDEN_SIZE)
+        kg = NeurosymbolicKG()
+        sandbox = AgenticSandbox()
+        print("[OK] Cognitive Controller initialized (for DIP)")
+        print("[OK] Neurosymbolic KG initialized (for DIP)")
+        print("[OK] Agentic Sandbox initialized (for DIP)")
+        
         # Option 1: Use the predictive coding world (local learning)
+        # Now with strict Dependency Injection - pass the modules as constructor arguments
         world_model = PredictiveCodingWorldCore(
             dim_x=WORLD_DIMENSIONS[0],
             dim_y=WORLD_DIMENSIONS[1],
@@ -313,7 +327,10 @@ def main():
             use_moe=USE_MOE,
             num_experts=NUM_EXPERTS,
             moe_k=MOE_K,
-            num_blocks=NUM_BLOCKS
+            num_blocks=NUM_BLOCKS,
+            cognitive_controller=cognitive_controller,  # DIP: inject dependency
+            kg=kg,  # DIP: inject dependency
+            sandbox=sandbox  # DIP: inject dependency
         )
         
         # Option 2: Use the basic world core (continuous latent)

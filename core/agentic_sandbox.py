@@ -343,6 +343,9 @@ class ToolOutputParser:
 class AgenticSandbox:
     """
     Main class integrating agent environment and tool execution.
+    
+    All methods are wrapped in strict try/except blocks to prevent physics loop crashes.
+    Returns structured dictionaries instead of raising exceptions.
     """
     
     def __init__(self, working_dir: Optional[str] = None):
@@ -353,7 +356,7 @@ class AgenticSandbox:
         # KG triple storage
         self.kg_triples: List[Tuple[str, str, str]] = []
     
-    def execute_tool(self, tool_name: str, **kwargs) -> ToolResult:
+    def execute_tool(self, tool_name: str, **kwargs) -> Dict[str, Any]:
         """
         Execute a tool and parse results.
         
@@ -362,32 +365,114 @@ class AgenticSandbox:
             **kwargs: Tool arguments
             
         Returns:
-            Tool result
+            Dictionary with 'tool', 'success', 'output' or 'error' keys.
+            This ensures NO exceptions propagate to the physics engine!
         """
-        result = self.environment.execute(tool_name, **kwargs)
-        
-        # Parse output into KG triples
-        if result.success and result.output:
-            triples = self.parser.parse(str(result.output))
-            self.kg_triples.extend(triples)
-        
-        return result
+        try:
+            result = self.environment.execute(tool_name, **kwargs)
+            
+            # Parse output into KG triples
+            if result.success and result.output:
+                try:
+                    triples = self.parser.parse(str(result.output))
+                    self.kg_triples.extend(triples)
+                except Exception as parse_error:
+                    # Don't let parsing errors crash the physics loop
+                    return {
+                        "tool": tool_name,
+                        "success": True,  # Tool executed OK
+                        "output": result.output,
+                        "warning": f"KG parsing failed: {str(parse_error)}"
+                    }
+            
+            # Return structured dictionary format
+            return {
+                "tool": tool_name,
+                "success": result.success,
+                "output": result.output if result.success else None,
+                "error": result.error if not result.success else None
+            }
+            
+        except Exception as e:
+            # CRITICAL: Never let exceptions escape to the physics engine!
+            # Return a structured error dictionary instead
+            return {
+                "tool": tool_name,
+                "success": False,
+                "output": None,
+                "error": str(e)
+            }
     
-    def get_kg_triples(self) -> List[Tuple[str, str, str]]:
-        """Get all accumulated KG triples."""
-        return self.kg_triples
-    
-    def clear_triples(self):
-        """Clear accumulated KG triples."""
-        self.kg_triples = []
-    
-    def get_execution_summary(self) -> str:
-        """Get a summary of tool executions."""
-        history = self.environment.get_history()
+    def execute_tool_safe(self, tool_name: str, **kwargs) -> Dict[str, Any]:
+        """
+        Alias for execute_tool with explicit safe naming.
         
-        summary = f"Total executions: {len(history)}\n"
-        summary += f"Successful: {sum(1 for h in history if h.success)}\n"
-        summary += f"Failed: {sum(1 for h in history if not h.success)}\n"
-        summary += f"KG triples extracted: {len(self.kg_triples)}\n"
+        Returns:
+            Structured dictionary: {"tool": name, "success": bool, "output": result_or_None, "error": error_msg_or_None}
+        """
+        return self.execute_tool(tool_name, **kwargs)
+    
+    def get_kg_triples(self) -> Dict[str, Any]:
+        """
+        Get all accumulated KG triples.
         
-        return summary
+        Returns:
+            Dictionary with 'triples' and 'success' keys.
+        """
+        try:
+            return {
+                "success": True,
+                "triples": self.kg_triples,
+                "count": len(self.kg_triples)
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "triples": [],
+                "count": 0
+            }
+    
+    def clear_triples(self) -> Dict[str, Any]:
+        """
+        Clear accumulated KG triples.
+        
+        Returns:
+            Dictionary with 'success' key.
+        """
+        try:
+            self.kg_triples = []
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def get_execution_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of tool executions.
+        
+        Returns:
+            Dictionary with execution statistics.
+        """
+        try:
+            history = self.environment.get_history()
+            
+            return {
+                "success": True,
+                "summary": {
+                    "total_executions": len(history),
+                    "successful": sum(1 for h in history if h.success),
+                    "failed": sum(1 for h in history if not h.success),
+                    "kg_triples_extracted": len(self.kg_triples)
+                }
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "summary": {
+                    "total_executions": 0,
+                    "successful": 0,
+                    "failed": 0,
+                    "kg_triples_extracted": 0
+                }
+            }

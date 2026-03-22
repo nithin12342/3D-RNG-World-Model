@@ -62,16 +62,34 @@ class CognitiveController:
         self.current_plan: Optional[Dict[str, Any]] = None
         self.last_hidden_state: Optional[np.ndarray] = None
         
-    def run(self, hidden_state: np.ndarray) -> Dict[str, Any]:
+    def run(self, input_data: Any) -> Dict[str, Any]:
         """
         Process hidden state through cognitive controller.
         
         Args:
-            hidden_state: Average hidden state from the world model
+            input_data: Either a numpy array or a dictionary with:
+                - 'prompt': decoded string summary from VectorDecoder
+                - 'hidden_state': raw hidden state numpy array
+                - 'text_action_count': count of text/action nodes
+                - 'kg_count': count of KG nodes
             
         Returns:
             Dictionary containing cognitive processing results
         """
+        # Handle both legacy numpy array input and new dictionary input
+        if isinstance(input_data, dict):
+            # New format: dictionary from VectorDecoder
+            hidden_state = input_data.get('hidden_state')
+            prompt = input_data.get('prompt', '')
+            text_action_count = input_data.get('text_action_count', 0)
+            kg_count = input_data.get('kg_count', 0)
+        else:
+            # Legacy format: raw numpy array
+            hidden_state = input_data
+            prompt = ''
+            text_action_count = 0
+            kg_count = 0
+        
         self.last_hidden_state = hidden_state.copy()
         
         if self._controller is not None:
@@ -85,14 +103,20 @@ class CognitiveController:
                 'hidden_state_shape': hidden_state.shape,
                 'processed': True,
                 'state_magnitude': state_magnitude,
-                'controller_state': self._controller.get_state()
+                'controller_state': self._controller.get_state(),
+                'decoded_prompt': prompt,  # Include the decoded prompt for reference
+                'text_action_count': text_action_count,
+                'kg_count': kg_count
             }
         else:
             # Fallback processing when modules aren't available
             result = {
                 'hidden_state_shape': hidden_state.shape,
                 'processed': True,
-                'state_magnitude': float(np.linalg.norm(hidden_state))
+                'state_magnitude': float(np.linalg.norm(hidden_state)),
+                'decoded_prompt': prompt,
+                'text_action_count': text_action_count,
+                'kg_count': kg_count
             }
         
         return result
@@ -693,6 +717,79 @@ class PredictiveCodingNode:
         self.refractory_counter = steps
 
 
+class VectorDecoder:
+    """
+    Vector Decoder for bridging continuous tensor states to LLM string inputs.
+    
+    This follows the Interface Segregation Principle - providing a clean decode
+    interface that translates raw hidden states into meaningful string summaries.
+    """
+    
+    def __init__(self, hidden_size: int = 768):
+        """
+        Initialize the Vector Decoder.
+        
+        Args:
+            hidden_size: Dimensionality of hidden state vectors
+        """
+        self.hidden_size = hidden_size
+    
+    def decode_to_string(self, state: np.ndarray) -> str:
+        """
+        Decode a continuous hidden state vector into a formatted string summary.
+        
+        Args:
+            state: Hidden state vector [hidden_size]
+            
+        Returns:
+            Formatted string summary with mathematical moments
+        """
+        # Calculate mathematical moments
+        mean_val = float(np.mean(state))
+        max_magnitude = float(np.max(np.abs(state)))
+        std_val = float(np.std(state))
+        
+        # Format into structured prompt string
+        summary = (
+            f"State Vector Magnitude: {max_magnitude:.4f}. "
+            f"Mean: {mean_val:.4f}. "
+            f"StdDev: {std_val:.4f}. "
+            f"Requesting graph evaluation..."
+        )
+        
+        return summary
+    
+    def decode_batch(self, states: List[np.ndarray]) -> str:
+        """
+        Decode a batch of hidden states into a combined summary.
+        
+        Args:
+            states: List of hidden state vectors
+            
+        Returns:
+            Combined string summary
+        """
+        if not states:
+            return "No state vectors to decode."
+        
+        # Stack and compute aggregate statistics
+        state_stack = np.stack(states)
+        mean_val = float(np.mean(state_stack))
+        max_magnitude = float(np.max(np.abs(state_stack)))
+        std_val = float(np.std(state_stack))
+        
+        summary = (
+            f"Combined State Analysis: "
+            f"Max Magnitude: {max_magnitude:.4f}. "
+            f"Mean: {mean_val:.4f}. "
+            f"StdDev: {std_val:.4f}. "
+            f"Vector count: {len(states)}. "
+            f"Requesting cognitive evaluation..."
+        )
+        
+        return summary
+
+
 class PredictiveCodingWorldCore:
     """
     3D World Core implementing Local Predictive Coding.
@@ -709,7 +806,10 @@ class PredictiveCodingWorldCore:
                  use_moe: bool = True,
                  num_experts: int = 8,
                  moe_k: int = 2,
-                 num_blocks: int = 8):
+                 num_blocks: int = 8,
+                 cognitive_controller=None,
+                 kg=None,
+                 sandbox=None):
         """
         Initialize the Predictive Coding World Core.
         
@@ -797,20 +897,42 @@ class PredictiveCodingWorldCore:
         # Prediction target face: x=max plane (what we're trying to predict)
         self.prediction_target_face_coords = self._generate_face_coords(dim_x - 1, vision_face_size)
         
-        # --- COMPOSITION: Wire in neurosymbolic modules ---
+        # --- COMPOSITION: Wire in neurosymbolic modules (Dependency Injection) ---
         # Using Composition over Inheritance - encapsulate cognitive modules as member objects
-        if NEUROSYMBOLIC_AVAILABLE:
+        # Dependencies are now injected via constructor (DIP compliance)
+        if cognitive_controller is not None:
+            self.cognitive_controller = cognitive_controller
+            print(f"  Cognitive Controller: Injected (DIP)")
+        elif NEUROSYMBOLIC_AVAILABLE:
             self.cognitive_controller = CognitiveController(hidden_size=hidden_size)
-            self.kg = NeurosymbolicKG()
-            self.sandbox = AgenticSandbox()
-            print(f"  Cognitive Controller: Initialized")
-            print(f"  Neurosymbolic KG: Initialized")
-            print(f"  Agentic Sandbox: Initialized")
+            print(f"  Cognitive Controller: Initialized (fallback)")
         else:
             self.cognitive_controller = None
+            print(f"  Cognitive Controller: Not available")
+        
+        if kg is not None:
+            self.kg = kg
+            print(f"  Neurosymbolic KG: Injected (DIP)")
+        elif NEUROSYMBOLIC_AVAILABLE:
+            self.kg = NeurosymbolicKG()
+            print(f"  Neurosymbolic KG: Initialized (fallback)")
+        else:
             self.kg = None
+            print(f"  Neurosymbolic KG: Not available")
+        
+        if sandbox is not None:
+            self.sandbox = sandbox
+            print(f"  Agentic Sandbox: Injected (DIP)")
+        elif NEUROSYMBOLIC_AVAILABLE:
+            self.sandbox = AgenticSandbox()
+            print(f"  Agentic Sandbox: Initialized (fallback)")
+        else:
             self.sandbox = None
-            print(f"  Neurosymbolic modules: Not available")
+            print(f"  Agentic Sandbox: Not available")
+        
+        # Initialize Vector Decoder for bridging tensor states to LLM string inputs
+        self.vector_decoder = VectorDecoder(hidden_size=hidden_size)
+        print(f"  Vector Decoder: Initialized")
         
         # Define KG face (X=4) and Agentic face (X=5) coordinates
         # These planes will store knowledge graph and agentic tool state
@@ -1014,37 +1136,7 @@ class PredictiveCodingWorldCore:
                 node.hidden_state *= 0.80
         # --- END OVERRIDE ---
         
-        # --- SRP: COGNITIVE PROCESSING ---
-        # Extract average hidden state from X=2 (text/action plane) and X=4 (KG plane)
-        # and pass to cognitive controller for processing
-        # This keeps the physics loop clean; cognitive logic is handled by the controller
-        if self.cognitive_controller is not None:
-            # Extract states from X=2 plane (text/action)
-            text_action_states = []
-            for coord in self.text_face_coords:
-                if coord in self.nodes:
-                    text_action_states.append(self.nodes[coord].hidden_state)
-            
-            # Extract states from X=4 plane (KG face)
-            kg_states = []
-            for coord in self.kg_face_coords:
-                if coord in self.nodes:
-                    kg_states.append(self.nodes[coord].hidden_state)
-            
-            # Combine states for cognitive processing
-            combined_states = []
-            if text_action_states:
-                combined_states.extend(text_action_states)
-            if kg_states:
-                combined_states.extend(kg_states)
-            
-            if combined_states:
-                avg_hidden_state = np.mean(combined_states, axis=0)
-                # Pass to cognitive controller - clean interface, no direct state manipulation
-                cognitive_result = self.cognitive_controller.run(avg_hidden_state)
-                # Store result for later use (e.g., tool execution in sandbox)
-                outputs['cognitive_result'] = cognitive_result
-        # --- END COGNITIVE PROCESSING ---
+
 
         # Step 4: Gather actual neighbor states for error calculation
         actual_neighbor_states_dict: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], np.ndarray]] = {}
@@ -1090,6 +1182,57 @@ class PredictiveCodingWorldCore:
         
         # Step 8: Collect outputs from various faces
         outputs = {}
+        
+        # --- SRP: COGNITIVE PROCESSING (with Vector Decoding Bridge) ---
+        # Extract average hidden state from X=2 (text/action plane) and X=4 (KG plane)
+        # and pass to cognitive controller for processing
+        # This keeps the physics loop clean; cognitive logic is handled by the controller
+        # 
+        # CRITICAL: Raw tensors are NOT passed to LLM - they must be decoded first!
+        # This follows Interface Segregation - VectorDecoder translates continuous states
+        # to string summaries before LLM consumption.
+        if self.cognitive_controller is not None:
+            # Extract states from X=2 plane (text/action)
+            text_action_states = []
+            for coord in self.text_face_coords:
+                if coord in self.nodes:
+                    text_action_states.append(self.nodes[coord].hidden_state)
+            
+            # Extract states from X=4 plane (KG face)
+            kg_states = []
+            for coord in self.kg_face_coords:
+                if coord in self.nodes:
+                    kg_states.append(self.nodes[coord].hidden_state)
+            
+            # Combine states for cognitive processing
+            combined_states = []
+            if text_action_states:
+                combined_states.extend(text_action_states)
+            if kg_states:
+                combined_states.extend(kg_states)
+            
+            if combined_states:
+                avg_hidden_state = np.mean(combined_states, axis=0)
+                
+                # VECTOR DECODING BRIDGE: Convert raw tensor to string summary
+                # This is the critical bridging layer - NO raw vectors hitting the LLM!
+                decoded_prompt = self.vector_decoder.decode_batch(combined_states)
+                
+                # Create a string-based input for the cognitive controller
+                # Pass the decoded prompt string instead of raw tensor
+                cognitive_input = {
+                    'prompt': decoded_prompt,
+                    'hidden_state': avg_hidden_state,  # Keep for internal processing
+                    'text_action_count': len(text_action_states),
+                    'kg_count': len(kg_states)
+                }
+                
+                # Pass to cognitive controller - clean interface, no direct state manipulation
+                cognitive_result = self.cognitive_controller.run(cognitive_input)
+                # Store result for later use (e.g., tool execution in sandbox)
+                outputs['cognitive_result'] = cognitive_result
+                outputs['decoded_prompt'] = decoded_prompt  # Store for debugging
+        # --- END COGNITIVE PROCESSING ---
         
         # Vision output (what the system "sees" internally)
         vision_states = []
