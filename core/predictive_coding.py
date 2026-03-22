@@ -1129,13 +1129,14 @@ class PredictiveCodingWorldCore:
             states_pt = torch.from_numpy(states_np).float().unsqueeze(1)  # Add seq dim
             
             # Route through MoE experts - UNFROZEN for gradient computation
-            moe_out_pt = self.moe_layer(states_pt)  # Keep as PyTorch tensor for gradient tracking
+            moe_out_pt = self.moe_layer(states_pt)
             
-            # Store the PyTorch tensor output for gradient computation during error phase
-            self._moe_output_pt = moe_out_pt.detach().requires_grad_(True)
+            # Preserve the computational graph for the Hebbian backward pass
+            # (DO NOT detach here - we need the graph to flow to moe_layer parameters)
+            self._moe_output_pt = moe_out_pt
             
-            # Convert to NumPy for physics engine (detached from graph)
-            moe_out_np = self._moe_output_pt.detach().squeeze(1).numpy()
+            # Detach ONLY for the continuous NumPy physics engine
+            moe_out_np = moe_out_pt.detach().squeeze(1).numpy()
             
             # Update states and store block representations
             for i, coord in enumerate(node_coords):
