@@ -708,6 +708,16 @@ class SpatialTokenizer:
         
         # Ensure dimensions are compatible with patch size
         # If not, resize the image to be divisible by patch size
+        # First ensure we have batch dimension (add if missing)
+        if image_tensor.dim() == 3:
+            image_tensor = image_tensor.unsqueeze(0)  # (1, C, H, W) or (1, H, W)
+        
+        # If still 3 dims (1, H, W for grayscale), add channel dim
+        if image_tensor.dim() == 3 and image_tensor.shape[0] == 1:
+            # Check if it's (1, H, W) format
+            if image_tensor.shape[1] > 4:  # Likely H, not C
+                image_tensor = image_tensor.unsqueeze(1)  # -> (1, 1, H, W)
+        
         B, C, H, W = image_tensor.shape
         ph, pw = self.patch_size
         
@@ -719,7 +729,7 @@ class SpatialTokenizer:
             # Apply padding ( replicating edge pixels)
             image_tensor = F.pad(image_tensor, (0, w_pad, 0, h_pad), mode='replicate')
         
-        # Add batch dimension if not present: (1, C, H, W)
+        # Batch dimension is already added above - ensure we have 4 dims
         if image_tensor.dim() == 3:
             image_tensor = image_tensor.unsqueeze(0)
         
