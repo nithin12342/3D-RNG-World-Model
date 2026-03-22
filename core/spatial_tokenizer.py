@@ -58,11 +58,15 @@ class AudioFeatureExtractor(nn.Module):
         Extract audio features.
         
         Args:
-            x: Audio tensor of shape (B, T) or (B, 1, F, T)
+            x: Audio tensor of shape (B, T) or (B, 1, F, T) or (T,) for single sample
             
         Returns:
             Audio embeddings of shape (B, embed_dim)
         """
+        # Handle 1D input (single sample without batch dimension)
+        if x.dim() == 1:
+            x = x.unsqueeze(0)  # (1, T)
+        
         if x.dim() == 2:  # (B, T) raw waveform
             # Compute spectrogram
             x = torch.stft(x, n_fft=self.n_fft, hop_length=self.hop_length, 
