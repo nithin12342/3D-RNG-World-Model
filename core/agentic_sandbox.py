@@ -55,6 +55,7 @@ class AgentEnvironment:
         """
         self.working_dir = working_dir or tempfile.mkdtemp()
         self.tools: Dict[str, Callable] = {}
+        self.tool_descriptions: Dict[str, str] = {}
         self.execution_history: List[ToolResult] = []
         
         # Register default tools
@@ -79,7 +80,11 @@ class AgentEnvironment:
             description: Tool description
         """
         self.tools[name] = function
-        self.tools[name].__tool_description__ = description
+        self.tool_descriptions[name] = description
+    
+    def get_tool_description(self, name: str) -> str:
+        """Get the description for a registered tool."""
+        return self.tool_descriptions.get(name, "")
     
     def execute(self, tool_name: str, **kwargs) -> ToolResult:
         """
