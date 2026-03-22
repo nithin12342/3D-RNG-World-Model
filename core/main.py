@@ -319,8 +319,8 @@ def main():
             dim_y=WORLD_DIMENSIONS[1],
             dim_z=WORLD_DIMENSIONS[2],
             hidden_size=HIDDEN_SIZE,
-            leak_rate=0.1,
-            learning_rate=0.01,
+            leak_rate=0.05,  # Optimal base neurochemistry from tuning
+            learning_rate=0.25,  # Optimal base neurochemistry from tuning
             vision_face_size=VISION_FACE_SIZE,
             text_face_size=TEXT_FACE_SIZE,
             action_zone_size=ACTION_ZONE_SIZE,
