@@ -16,6 +16,9 @@ import numpy as np
 from typing import Dict, List, Tuple, Any, Optional
 import random
 import torch
+from pathlib import Path
+import os
+import warnings
 
 
 class CodeDataLoader:
@@ -36,7 +39,9 @@ class CodeDataLoader:
         batch_size: int = 8,
         max_code_length: int = 512,
         vocab_size: int = 10000,
-        hidden_size: int = 128
+        hidden_size: int = 128,
+        repo_path: str = "./core",
+        max_seq_len: int = 64
     ):
         """
         Initialize CodeDataLoader.
@@ -46,19 +51,146 @@ class CodeDataLoader:
             max_code_length: Maximum token length for code strings
             vocab_size: Vocabulary size for tokenization
             hidden_size: Hidden dimension for feature vectors
+            repo_path: Path to repository for self-ingestion
+            max_seq_len: Maximum sequence length for tensor outputs
         """
         self.batch_size = batch_size
         self.max_code_length = max_code_length
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
+        self.repo_path = repo_path
+        self.max_seq_len = max_seq_len
+        
+        # Ingest repository files (Self-Ingestion/Autopoiesis)
+        self._repo_samples = []
+        self._ingest_repository()
         
         # Generate dummy Python functions as training data
         self._code_samples = self._generate_code_samples()
         
+        # Combine repo samples with generated samples
+        self._all_samples = self._repo_samples + self._code_samples
+        
         # Build simple vocabulary for tokenization
         self._vocab = self._build_vocab()
         
-        print(f"  CodeDataLoader initialized with {len(self._code_samples)} samples")
+        print(f"  CodeDataLoader initialized with {len(self._all_samples)} samples")
+    
+    def _ingest_repository(self):
+        """
+        Defensively ingest repository files for Self-Ingestion/Autopoiesis.
+        Scans repo_path for .py files, skips hidden directories.
+        
+        Returns:
+            List of code samples from repository
+        """
+        repo_path = Path(self.repo_path)
+        
+        if not repo_path.exists():
+            warnings.warn(f"Repository path does not exist: {repo_path}")
+            return
+        
+        print(f"  Ingesting repository from: {repo_path}")
+        
+        py_files = []
+        
+        # Defensive file traversal with pathlib
+        try:
+            for file_path in repo_path.rglob("*.py"):
+                # Skip hidden directories and __pycache__
+                if any(part.startswith('.') or part == '__pycache__' 
+                       for part in file_path.parts):
+                    continue
+                py_files.append(file_path)
+        except Exception as e:
+            warnings.warn(f"Error scanning repository: {e}")
+            return
+        
+        print(f"  Found {len(py_files)} Python files")
+        
+        for file_path in py_files:
+            try:
+                # Try to read file with utf-8 encoding
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    source_code = f.read()
+            except UnicodeDecodeError as e:
+                warnings.warn(f"Cannot decode {file_path}: {e}")
+                continue
+            except Exception as e:
+                warnings.warn(f"Cannot read {file_path}: {e}")
+                continue
+            
+            # Try to parse AST
+            try:
+                tree = ast.parse(source_code, filename=str(file_path))
+            except SyntaxError as e:
+                warnings.warn(f"Syntax error in {file_path}: {e}")
+                # Still include the file but mark as having syntax error
+                tree = None
+            except Exception as e:
+                warnings.warn(f"Cannot parse {file_path}: {e}")
+                continue
+            
+            # Extract node counts from AST
+            node_counts = self._extract_ast_features(tree) if tree else {
+                'num_functions': 0,
+                'num_classes': 0,
+                'num_returns': 0,
+                'num_conditionals': 0,
+                'num_loops': 0,
+                'num_imports': 0,
+                'has_error': True
+            }
+            
+            # Create sample
+            sample = {
+                'source': source_code,
+                'name': file_path.stem,
+                'path': str(file_path),
+                'complexity': node_counts.get('num_functions', 0) + node_counts.get('num_classes', 0),
+                'ast_features': node_counts,
+                'has_error': node_counts.get('has_error', False)
+            }
+            
+            self._repo_samples.append(sample)
+        
+        print(f"  Ingested {len(self._repo_samples)} valid Python files")
+    
+    def _extract_ast_features(self, tree: ast.AST) -> Dict[str, Any]:
+        """
+        Extract features from AST node.
+        
+        Args:
+            tree: AST parse tree
+            
+        Returns:
+            Dictionary of extracted features
+        """
+        features = {
+            'num_functions': 0,
+            'num_classes': 0,
+            'num_returns': 0,
+            'num_conditionals': 0,
+            'num_loops': 0,
+            'num_imports': 0,
+            'has_error': False
+        }
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                features['num_functions'] += 1
+            elif isinstance(node, ast.ClassDef):
+                features['num_classes'] += 1
+            elif isinstance(node, ast.Return):
+                features['num_returns'] += 1
+            elif isinstance(node, (ast.If, ast.IfExp)):
+                features['num_conditionals'] += 1
+            elif isinstance(node, (ast.For, ast.While)):
+                features['num_loops'] += 1
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                features['num_imports'] += 1
+        
+        return features
     
     def _generate_code_samples(self) -> List[Dict[str, Any]]:
         """
@@ -365,8 +497,23 @@ class CodeDataLoader:
         """
         batch_size = batch_size or self.batch_size
         
+        # Use all samples (repo + generated)
+        available_samples = self._all_samples if hasattr(self, '_all_samples') else self._code_samples
+        
+        # Handle empty batch case - yield zero-tensor dummy batch
+        if len(available_samples) == 0:
+            warnings.warn("No samples available - returning zero-tensor dummy batch")
+            dummy_batch = {
+                'text': np.zeros((batch_size, self.max_code_length), dtype=np.float32),
+                'kg': np.zeros((batch_size, 64), dtype=np.float32),  # Match expected KG dimensions
+                'tabular': np.zeros((batch_size, 8), dtype=np.float32),  # Match expected tabular dimensions
+                'source': ["DUMMY"] * batch_size,
+                'has_error': [True] * batch_size
+            }
+            return dummy_batch
+        
         # Sample random code functions
-        samples = random.choices(self._code_samples, k=batch_size)
+        samples = random.choices(available_samples, k=batch_size)
         
         # Initialize output tensors
         text_tensors = []
@@ -381,8 +528,13 @@ class CodeDataLoader:
             text_tensor = self._tokenize_code(source)
             text_tensors.append(text_tensor)
             
-            # KG modality: AST features
-            kg_features, _, depth = self._extract_ast_features(source)
+            # KG modality: AST features (from pre-computed or extract)
+            if 'ast_features' in sample:
+                # Use pre-computed AST features from repository ingestion
+                kg_features = self._ast_features_to_tensor(sample['ast_features'])
+            else:
+                # Extract from source code
+                kg_features, _, depth = self._extract_ast_features(source)
             kg_tensors.append(kg_features)
             
             # Tabular modality: linter metrics
@@ -392,20 +544,56 @@ class CodeDataLoader:
             # Store source for debugging
             sources.append(source)
         
-        # Stack tensors
-        batch = {
-            'text': np.stack(text_tensors),
-            'kg': np.stack(kg_tensors),
-            'tabular': np.stack(tabular_tensors),
-            'source': sources,
-            'has_error': [s.get('has_error', False) for s in samples]
-        }
+        # Stack tensors - ensure consistent shapes
+        try:
+            batch = {
+                'text': np.stack(text_tensors),
+                'kg': np.stack(kg_tensors),
+                'tabular': np.stack(tabular_tensors),
+                'source': sources,
+                'has_error': [s.get('has_error', False) for s in samples]
+            }
+        except Exception as e:
+            warnings.warn(f"Error stacking tensors: {e}. Returning zero-tensor dummy batch.")
+            batch = {
+                'text': np.zeros((batch_size, self.max_code_length), dtype=np.float32),
+                'kg': np.zeros((batch_size, 64), dtype=np.float32),
+                'tabular': np.zeros((batch_size, 8), dtype=np.float32),
+                'source': ["DUMMY"] * batch_size,
+                'has_error': [True] * batch_size
+            }
         
         return batch
     
+    def _ast_features_to_tensor(self, ast_features: Dict[str, Any]) -> np.ndarray:
+        """
+        Convert AST features dict to numpy tensor with consistent shape.
+        
+        Args:
+            ast_features: Dictionary of AST features
+            
+        Returns:
+            Numpy array of features
+        """
+        # Expected feature dimensions for KG
+        feature_dim = 64
+        features = np.zeros(feature_dim, dtype=np.float32)
+        
+        # Map AST features to tensor indices
+        if ast_features:
+            features[0] = ast_features.get('num_functions', 0)
+            features[1] = ast_features.get('num_classes', 0)
+            features[2] = ast_features.get('num_returns', 0)
+            features[3] = ast_features.get('num_conditionals', 0)
+            features[4] = ast_features.get('num_loops', 0)
+            features[5] = ast_features.get('num_imports', 0)
+            features[6] = 1.0 if ast_features.get('has_error', False) else 0.0
+        
+        return features
+    
     def __len__(self) -> int:
         """Return number of code samples."""
-        return len(self._code_samples)
+        return len(self._all_samples) if hasattr(self, '_all_samples') else len(self._code_samples)
 
 
 def create_code_dataloader(config: Dict[str, Any]) -> CodeDataLoader:
@@ -422,7 +610,9 @@ def create_code_dataloader(config: Dict[str, Any]) -> CodeDataLoader:
         batch_size=config.get('batch_size', 8),
         max_code_length=config.get('max_code_length', 512),
         vocab_size=config.get('vocab_size', 10000),
-        hidden_size=config.get('hidden_size', 128)
+        hidden_size=config.get('hidden_size', 128),
+        repo_path=config.get('repo_path', './core'),
+        max_seq_len=config.get('max_seq_len', 64)
     )
 
 

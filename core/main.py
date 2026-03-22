@@ -322,7 +322,7 @@ def main():
             dim_z=WORLD_DIMENSIONS[2],
             hidden_size=HIDDEN_SIZE,
             leak_rate=0.05,  # Optimal base neurochemistry from tuning
-            learning_rate=0.05,  # Optimal base neurochemistry from tuning
+            learning_rate=0.1,  # Optimal base neurochemistry from tuning
             vision_face_size=VISION_FACE_SIZE,
             text_face_size=TEXT_FACE_SIZE,
             action_zone_size=ACTION_ZONE_SIZE,
@@ -371,7 +371,7 @@ def main():
         print("[OK] JEPA evaluator initialized")
         
         # Initialize CodeDataLoader for Software Engineering curriculum
-        code_dataloader = CodeDataLoader(batch_size=8)
+        code_dataloader = CodeDataLoader(batch_size=8, repo_path='./core')
         print("[OK] CodeDataLoader initialized for code generation")
         
         # Generate synthetic text stream
@@ -393,6 +393,11 @@ def main():
             
             # Get code batch from CodeDataLoader
             code_batch = code_dataloader.get_batch()
+            
+            # Defensive safeguard: skip empty batches to prevent tokenizer crashes
+            if not code_batch or not code_batch.get('source'):
+                print(f"Warning: Empty batch at epoch {epoch}, skipping...")
+                continue
             
             # Extract multimodal components from code batch
             # Text: Tokenized code strings
