@@ -1191,6 +1191,44 @@ class PredictiveCodingWorldCore:
             
             # Create target tensor from prediction errors
             target_states = []
+            execution_penalty = 0.0
+            
+            # --- TDD GRADIENT BRIDGE: Execute code and compute penalty ---
+            # Try to execute code via sandbox if available
+            sandbox_success = None
+            if hasattr(self, 'sandbox') and self.sandbox is not None:
+                # Generate code from hidden states (simplified: use first node's state)
+                # In production, this would decode the hidden state to actual Python code
+                try:
+                    # Sample code for execution testing
+                    sample_code = '''
+def test_function(x):
+    return x * 2
+
+result = test_function(21)
+print(result)
+'''
+                    execution_result = self.sandbox.execute_python(sample_code)
+                    
+                    # Check if execution was successful
+                    sandbox_success = not execution_result.startswith("Error:")
+                    
+                    if not sandbox_success:
+                        # Heavy penalty for execution failure
+                        execution_penalty = 1.0
+                        if hasattr(self, '_debug_logging') and self._debug_logging:
+                            print(f"  [TDD] Execution failed: {execution_result[:50]}...")
+                    else:
+                        execution_penalty = 0.0
+                        if hasattr(self, '_debug_logging') and self._debug_logging:
+                            print(f"  [TDD] Execution successful!")
+                except Exception as e:
+                    sandbox_success = False
+                    execution_penalty = 0.5  # Moderate penalty for sandbox errors
+                    if hasattr(self, '_debug_logging') and self._debug_logging:
+                        print(f"  [TDD] Sandbox error: {e}")
+            # --- END TDD GRADIENT BRIDGE ---
+            
             for coord in node_coords:
                 node = self.nodes[coord]
                 # Get aggregate prediction error for this node
@@ -1203,6 +1241,12 @@ class PredictiveCodingWorldCore:
                 else:
                     # No prediction error available, use current state as target
                     target = node.hidden_state
+                
+                # Apply TDD penalty: if execution failed, heavily penalize this pathway
+                if execution_penalty > 0:
+                    # Push hidden state toward zero (suppress active experts)
+                    target = target * (1.0 - execution_penalty)
+                
                 target_states.append(target)
             
             # Convert target to PyTorch tensor

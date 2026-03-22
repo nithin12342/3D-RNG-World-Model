@@ -25,6 +25,8 @@ try:
     # Import neurosymbolic modules for dependency injection
     from core.neurosymbolic_kg import NeurosymbolicKG
     from core.agentic_sandbox import AgenticSandbox
+    # Import Code DataLoader for Software Engineering pivot
+    from core.code_dataloader import CodeDataLoader
     print("Successfully imported all 3D-RNG modules")
 except ImportError as e:
     print(f"Import error: {e}")
@@ -368,13 +370,9 @@ def main():
         jepa_evaluator = JEPAEvaluator(world_model)
         print("[OK] JEPA evaluator initialized")
         
-        # Initialize Moving MNIST simulator
-        mnist_simulator = MovingMNISTSimulator(
-            frame_size=(64, 64),
-            digit_size=8,
-            speed=(2.0, 1.5)
-        )
-        print("[OK] Moving MNIST simulator initialized")
+        # Initialize CodeDataLoader for Software Engineering curriculum
+        code_dataloader = CodeDataLoader(batch_size=8)
+        print("[OK] CodeDataLoader initialized for code generation")
         
         # Generate synthetic text stream
         text_stream = create_synthetic_text_stream(NUM_EPOCHS)
@@ -393,30 +391,34 @@ def main():
         for epoch in range(NUM_EPOCHS):
             epoch_start_time = time.time()
             
-            # Generate next frame
-            frame = mnist_simulator.next_frame()
+            # Get code batch from CodeDataLoader
+            code_batch = code_dataloader.get_batch()
             
-            # Get corresponding text
-            text = text_stream[epoch] if epoch < len(text_stream) else "ongoing sequence"
+            # Extract multimodal components from code batch
+            # Text: Tokenized code strings
+            text = '\n'.join(code_batch['source'][:4])  # Use first 4 code samples as text
             
-            # --- Generate dummy multimodal data ---
-            # Audio: Random waveform tensor (B=1, T=16000 for 1 second at 16kHz)
-            dummy_audio = torch.randn(1, 16000)
+            # Tabular: Linter metrics from code
+            tabular = code_batch['tabular'][0]  # Use first sample's metrics
             
-            # Image: Random image (H=64, W=64, C=3)
-            dummy_image = np.random.randn(64, 64, 3).astype(np.float32)
+            # KG: AST features from code (for knowledge graph face)
+            kg_features = code_batch['kg'][0]  # Use first sample's AST features
             
-            # Tabular: Random tabular features (num_features=10)
-            dummy_tabular = np.random.randn(10).astype(np.float32)
+            # Image/Audio: Use KG features as proxy for image input
+            # (reshape to simulate image-like input)
+            image = np.tile(kg_features.reshape(-1, 1), (1, 64))[:64, :64].astype(np.float32) if len(kg_features) > 0 else np.zeros((64, 64), dtype=np.float32)
+            
+            # Audio: Use tabular metrics as proxy
+            audio = torch.from_numpy(tabular[:100].astype(np.float32)) if len(tabular) >= 100 else torch.randn(100)
             
             # --- Prepare inputs using spatial tokenizer with all 5 modalities ---
             # Returns unified mapping dictionary: {(x, y, z): embedding_vector}
             unified_mapping = spatial_tokenizer.tokenize_multi_modal(
-                video_frame=frame,
+                video_frame=None,  # No video for code
                 text=text,
-                audio=dummy_audio,
-                image=dummy_image,
-                tabular=dummy_tabular
+                audio=audio,
+                image=image,
+                tabular=tabular
             )
             
             # Convert unified mapping to arrays for world model
