@@ -534,35 +534,209 @@ class SpatialTokenizer:
                     
         return text_mapping
     
-    def tokenize_multi_modal(self, 
+    def tokenize_multi_modal(self,
                             video_frame: Optional[np.ndarray] = None,
-                            text: Optional[str] = None) -> Tuple[Dict[Tuple[int, int, int], np.ndarray], 
-                                                                Dict[Tuple[int, int, int], np.ndarray]]:
+                            text: Optional[str] = None,
+                            audio: Optional[torch.Tensor] = None,
+                            image: Optional[np.ndarray] = None,
+                            tabular: Optional[np.ndarray] = None) -> Dict[Tuple[int, int, int], np.ndarray]:
         """
-        Tokenize video and text inputs and map them to their respective faces.
+        Tokenize multi-modal inputs and map them to their respective faces.
         
         Args:
-            video_frame: Optional video frame of shape (H, W, C)
-            text: Optional text string
+            video_frame: Optional video frame of shape (H, W, C) - maps to X=0
+            text: Optional text string - maps to X=2
+            audio: Optional audio tensor of shape (B, T) or (B, 1, F, T) - maps to X=0
+            image: Optional image of shape (H, W, C) or (C, H, W) - maps to X=1
+            tabular: Optional tabular data of shape (num_features,) - maps to X=3
             
         Returns:
-            Tuple of (vision_mapping, text_mapping) where each is a dict mapping
-            coordinates to embedding vectors
+            Unified dictionary mapping (x, y, z) coordinates to embedding vectors
+            
+        Raises:
+            ValueError: If any provided modality is of incorrect type/tensor format
         """
-        vision_mapping = {}
-        text_mapping = {}
+        # --- FAIL FAST: Validate inputs immediately ---
+        if video_frame is not None and not isinstance(video_frame, np.ndarray):
+            raise ValueError(f"video_frame must be np.ndarray, got {type(video_frame)}")
+        if text is not None and not isinstance(text, str):
+            raise ValueError(f"text must be str, got {type(text)}")
+        if audio is not None and not isinstance(audio, torch.Tensor):
+            raise ValueError(f"audio must be torch.Tensor, got {type(audio)}")
+        if image is not None and not isinstance(image, np.ndarray):
+            raise ValueError(f"image must be np.ndarray, got {type(image)}")
+        if tabular is not None and not isinstance(tabular, np.ndarray):
+            raise ValueError(f"tabular must be np.ndarray, got {type(tabular)}")
         
-        # Process video frame if provided
+        # Initialize unified mapping dictionary
+        unified_mapping: Dict[Tuple[int, int, int], np.ndarray] = {}
+        
+        # --- X=0: Video + Audio (coexisting on same plane) ---
         if video_frame is not None:
             patch_embeds = self.tokenize_video_frame(video_frame)
             vision_mapping = self.map_patches_to_vision_face(patch_embeds)
+            unified_mapping.update(vision_mapping)
         
-        # Process text if provided
+        # Process audio and map to X=0 (coexisting with video)
+        if audio is not None:
+            audio_embeds = self._process_audio(audio)
+            audio_mapping = self.map_audio_to_face(audio_embeds)
+            unified_mapping.update(audio_mapping)
+        
+        # --- X=1: Images ---
+        if image is not None:
+            image_embeds = self._process_image(image)
+            image_mapping = self.map_image_to_image_face(image_embeds)
+            unified_mapping.update(image_mapping)
+        
+        # --- X=2: Text ---
         if text is not None:
             text_embeds = self.tokenize_text(text)
             text_mapping = self.map_text_to_text_face(text_embeds)
+            unified_mapping.update(text_mapping)
+        
+        # --- X=3: Tabular data ---
+        if tabular is not None:
+            tabular_embeds = self._process_tabular(tabular)
+            tabular_mapping = self.map_tabular_to_tabular_face(tabular_embeds)
+            unified_mapping.update(tabular_mapping)
             
-        return vision_mapping, text_mapping
+        return unified_mapping
+    
+    def _process_audio(self, audio: torch.Tensor) -> np.ndarray:
+        """
+        Process audio through audio_extractor.
+        
+        Args:
+            audio: Audio tensor of shape (B, T) or (B, 1, F, T)
+            
+        Returns:
+            Audio embeddings of shape (1, embed_dim)
+        """
+        with torch.no_grad():
+            audio_embeds = self.audio_extractor(audio)
+        return audio_embeds.cpu().numpy()
+    
+    def _process_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Process image through image_extractor.
+        
+        Args:
+            image: Image of shape (H, W, C) or (C, H, W)
+            
+        Returns:
+            Image embeddings of shape (num_patches, embed_dim)
+        """
+        # Convert to torch tensor
+        image_tensor = torch.from_numpy(image).float()
+        
+        # Handle different input formats
+        if image_tensor.dim() == 3:
+            if image_tensor.shape[2] == self.in_channels:  # (H, W, C)
+                image_tensor = image_tensor.permute(2, 0, 1)  # -> (C, H, W)
+        
+        # Add batch dimension: (1, C, H, W)
+        image_tensor = image_tensor.unsqueeze(0)
+        
+        with torch.no_grad():
+            image_embeds = self.image_extractor(image_tensor)
+        
+        return image_embeds.cpu().numpy()
+    
+    def _process_tabular(self, tabular: np.ndarray) -> np.ndarray:
+        """
+        Process tabular data through tabular_extractor.
+        
+        Args:
+            tabular: Tabular data of shape (num_features,)
+            
+        Returns:
+            Tabular embeddings of shape (1, embed_dim)
+        """
+        # Convert to torch tensor
+        tabular_tensor = torch.from_numpy(tabular).float().unsqueeze(0)
+        
+        with torch.no_grad():
+            tabular_embeds = self.tabular_extractor(tabular_tensor)
+        
+        return tabular_embeds.cpu().numpy()
+    
+    def map_audio_to_face(self, audio_embeds: np.ndarray) -> Dict[Tuple[int, int, int], np.ndarray]:
+        """
+        Map audio embeddings to the audio zone on X=0 plane.
+        
+        Args:
+            audio_embeds: Audio embeddings of shape (1, embed_dim)
+            
+        Returns:
+            Dictionary mapping (x, y, z) coordinates to audio embedding vectors
+        """
+        audio_mapping = {}
+        # Map audio to a single location on X=0 plane (coexisting with video)
+        # Use the first available position after video patches
+        vision_height, vision_width = self.vision_face_size
+        audio_coord = (0, vision_height // 2, vision_width - 1)  # X=0 for audio
+        audio_mapping[audio_coord] = audio_embeds[0].copy()
+        return audio_mapping
+    
+    def map_image_to_image_face(self, image_embeds: np.ndarray) -> Dict[Tuple[int, int, int], np.ndarray]:
+        """
+        Map image embeddings to the Image Face (x=1 plane).
+        
+        Args:
+            image_embeds: Image embeddings of shape (num_patches, embed_dim)
+            
+        Returns:
+            Dictionary mapping (x, y, z) coordinates to image embedding vectors
+        """
+        num_patches = image_embeds.shape[0]
+        # Use vision_face_size for image face as well
+        image_height, image_width = self.vision_face_size
+        expected_patches = image_height * image_width
+        
+        # Handle patch count mismatch
+        if num_patches != expected_patches:
+            if num_patches > expected_patches:
+                indices = np.linspace(0, num_patches-1, expected_patches, dtype=int)
+                image_embeds = image_embeds[indices]
+            else:
+                repeat_factor = expected_patches // num_patches
+                remainder = expected_patches % num_patches
+                repeated = np.repeat(image_embeds, repeat_factor, axis=0)
+                if remainder > 0:
+                    repeated = np.vstack([repeated, image_embeds[:remainder]])
+                image_embeds = repeated
+        
+        # Map patches to image face coordinates
+        image_mapping = {}
+        patch_idx = 0
+        
+        for y in range(image_height):
+            for z in range(image_width):
+                coord = (1, y, z)  # x=1 for image face
+                if patch_idx < len(image_embeds):
+                    image_mapping[coord] = image_embeds[patch_idx].copy()
+                    patch_idx += 1
+                else:
+                    image_mapping[coord] = np.zeros(self.embed_dim)
+                    
+        return image_mapping
+    
+    def map_tabular_to_tabular_face(self, tabular_embeds: np.ndarray) -> Dict[Tuple[int, int, int], np.ndarray]:
+        """
+        Map tabular embeddings to the Tabular Face (x=3 plane).
+        
+        Args:
+            tabular_embeds: Tabular embeddings of shape (1, embed_dim)
+            
+        Returns:
+            Dictionary mapping (x, y, z) coordinates to tabular embedding vectors
+        """
+        tabular_mapping = {}
+        # Map tabular to a single location on X=3 plane
+        tabular_coord = (3, 0, 0)  # X=3 for tabular
+        tabular_mapping[tabular_coord] = tabular_embeds[0].copy()
+        return tabular_mapping
 
 
 def create_spatial_tokenizer_example():

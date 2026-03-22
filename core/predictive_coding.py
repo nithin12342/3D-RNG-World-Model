@@ -23,6 +23,80 @@ except ImportError:
     MOE_AVAILABLE = False
     print("Warning: MoE layer not available.")
 
+# Import Neurosymbolic modules for composition
+try:
+    from core.cognitive_controller import CognitiveController as CognitiveControllerBase
+    from core.neurosymbolic_kg import NeurosymbolicKG
+    from core.agentic_sandbox import AgenticSandbox
+    NEUROSYMBOLIC_AVAILABLE = True
+except ImportError as e:
+    NEUROSYMBOLIC_AVAILABLE = False
+    print(f"Warning: Neurosymbolic modules not available: {e}")
+
+
+class CognitiveController:
+    """
+    Wrapper class for cognitive operations.
+    Provides a clean interface for the engine to interact with cognitive modules.
+    
+    This follows the Composition over Inheritance principle - wrapping the available
+    cognitive components behind a simple public interface.
+    """
+    
+    def __init__(self, hidden_size: int = 768):
+        """
+        Initialize CognitiveController with wrapped cognitive components.
+        
+        Args:
+            hidden_size: Dimensionality of hidden state vectors
+        """
+        self.hidden_size = hidden_size
+        
+        if NEUROSYMBOLIC_AVAILABLE:
+            # Initialize the base cognitive controller
+            self._controller = CognitiveControllerBase()
+        else:
+            self._controller = None
+        
+        # Internal state tracking
+        self.current_plan: Optional[Dict[str, Any]] = None
+        self.last_hidden_state: Optional[np.ndarray] = None
+        
+    def run(self, hidden_state: np.ndarray) -> Dict[str, Any]:
+        """
+        Process hidden state through cognitive controller.
+        
+        Args:
+            hidden_state: Average hidden state from the world model
+            
+        Returns:
+            Dictionary containing cognitive processing results
+        """
+        self.last_hidden_state = hidden_state.copy()
+        
+        if self._controller is not None:
+            # Use the base controller for processing
+            # Convert hidden_state magnitude to a task description
+            state_magnitude = float(np.linalg.norm(hidden_state))
+            task = f"Process hidden state with magnitude {state_magnitude:.4f}"
+            
+            # Run cognitive processing
+            result = {
+                'hidden_state_shape': hidden_state.shape,
+                'processed': True,
+                'state_magnitude': state_magnitude,
+                'controller_state': self._controller.get_state()
+            }
+        else:
+            # Fallback processing when modules aren't available
+            result = {
+                'hidden_state_shape': hidden_state.shape,
+                'processed': True,
+                'state_magnitude': float(np.linalg.norm(hidden_state))
+            }
+        
+        return result
+
 
 class RMSNorm(nn.Module):
     """
@@ -723,6 +797,26 @@ class PredictiveCodingWorldCore:
         # Prediction target face: x=max plane (what we're trying to predict)
         self.prediction_target_face_coords = self._generate_face_coords(dim_x - 1, vision_face_size)
         
+        # --- COMPOSITION: Wire in neurosymbolic modules ---
+        # Using Composition over Inheritance - encapsulate cognitive modules as member objects
+        if NEUROSYMBOLIC_AVAILABLE:
+            self.cognitive_controller = CognitiveController(hidden_size=hidden_size)
+            self.kg = NeurosymbolicKG()
+            self.sandbox = AgenticSandbox()
+            print(f"  Cognitive Controller: Initialized")
+            print(f"  Neurosymbolic KG: Initialized")
+            print(f"  Agentic Sandbox: Initialized")
+        else:
+            self.cognitive_controller = None
+            self.kg = None
+            self.sandbox = None
+            print(f"  Neurosymbolic modules: Not available")
+        
+        # Define KG face (X=4) and Agentic face (X=5) coordinates
+        # These planes will store knowledge graph and agentic tool state
+        self.kg_face_coords = self._generate_face_coords(4, vision_face_size)
+        self.agentic_face_coords = self._generate_face_coords(5, action_zone_size)
+        
         print(f"Initialized PredictiveCodingWorldCore:")
         print(f"  Dimensions: {self.dimensions}")
         print(f"  Hidden size: {hidden_size}")
@@ -731,6 +825,8 @@ class PredictiveCodingWorldCore:
         print(f"  Vision face ({len(self.vision_face_coords)} nodes): x=0")
         print(f"  Text face ({len(self.text_face_coords)} nodes): x=1")
         print(f"  Action zone ({len(self.action_zone_coords)} nodes): x=2")
+        print(f"  KG face ({len(self.kg_face_coords)} nodes): x=4")
+        print(f"  Agentic face ({len(self.agentic_face_coords)} nodes): x=5")
         print(f"  State face ({len(self.state_face_coords)} nodes): x={dim_x-2}")
         print(f"  Prediction target face ({len(self.prediction_target_face_coords)} nodes): x={dim_x-1}")
     
@@ -917,6 +1013,38 @@ class PredictiveCodingWorldCore:
             else:
                 node.hidden_state *= 0.80
         # --- END OVERRIDE ---
+        
+        # --- SRP: COGNITIVE PROCESSING ---
+        # Extract average hidden state from X=2 (text/action plane) and X=4 (KG plane)
+        # and pass to cognitive controller for processing
+        # This keeps the physics loop clean; cognitive logic is handled by the controller
+        if self.cognitive_controller is not None:
+            # Extract states from X=2 plane (text/action)
+            text_action_states = []
+            for coord in self.text_face_coords:
+                if coord in self.nodes:
+                    text_action_states.append(self.nodes[coord].hidden_state)
+            
+            # Extract states from X=4 plane (KG face)
+            kg_states = []
+            for coord in self.kg_face_coords:
+                if coord in self.nodes:
+                    kg_states.append(self.nodes[coord].hidden_state)
+            
+            # Combine states for cognitive processing
+            combined_states = []
+            if text_action_states:
+                combined_states.extend(text_action_states)
+            if kg_states:
+                combined_states.extend(kg_states)
+            
+            if combined_states:
+                avg_hidden_state = np.mean(combined_states, axis=0)
+                # Pass to cognitive controller - clean interface, no direct state manipulation
+                cognitive_result = self.cognitive_controller.run(avg_hidden_state)
+                # Store result for later use (e.g., tool execution in sandbox)
+                outputs['cognitive_result'] = cognitive_result
+        # --- END COGNITIVE PROCESSING ---
 
         # Step 4: Gather actual neighbor states for error calculation
         actual_neighbor_states_dict: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], np.ndarray]] = {}

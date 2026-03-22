@@ -7,6 +7,7 @@ and implements strict NaN/Explosion safeguards as specified in Phase 10: System 
 """
 
 import numpy as np
+import torch
 import time
 import sys
 import traceback
@@ -266,7 +267,7 @@ def main():
     print("="*70)
     
     # Configuration
-    WORLD_DIMENSIONS = (10, 10, 10)  # Manageable size for testing
+    WORLD_DIMENSIONS = (12, 10, 10)  # Expanded to accommodate KG (X=4) and Agentic (X=5) faces
     HIDDEN_SIZE = 32
     
     # Sparse MoE Configuration (for dynamic routing)
@@ -381,38 +382,57 @@ def main():
             # Get corresponding text
             text = text_stream[epoch] if epoch < len(text_stream) else "ongoing sequence"
             
-            # Prepare inputs using spatial tokenizer
-            vision_mapping, text_mapping = spatial_tokenizer.tokenize_multi_modal(frame, text)
+            # --- Generate dummy multimodal data ---
+            # Audio: Random waveform tensor (B=1, T=16000 for 1 second at 16kHz)
+            dummy_audio = torch.randn(1, 16000)
             
-            # Convert mappings to arrays for world model
+            # Image: Random image (H=64, W=64, C=3)
+            dummy_image = np.random.randn(64, 64, 3).astype(np.float32)
+            
+            # Tabular: Random tabular features (num_features=10)
+            dummy_tabular = np.random.randn(10).astype(np.float32)
+            
+            # --- Prepare inputs using spatial tokenizer with all 5 modalities ---
+            # Returns unified mapping dictionary: {(x, y, z): embedding_vector}
+            unified_mapping = spatial_tokenizer.tokenize_multi_modal(
+                video_frame=frame,
+                text=text,
+                audio=dummy_audio,
+                image=dummy_image,
+                tabular=dummy_tabular
+            )
+            
+            # Convert unified mapping to arrays for world model
             vision_input = None
             text_input = None
             
-            if vision_mapping:
-                # Convert vision mapping to array format
+            # Extract X=0 (video+audio) - Vision face
+            if unified_mapping:
                 vision_height, vision_width = VISION_FACE_SIZE
                 vision_array = np.zeros((vision_height * vision_width, EMBED_DIM))
                 idx = 0
                 for y in range(vision_height):
                     for z in range(vision_width):
                         coord = (0, y, z)
-                        if coord in vision_mapping:
-                            vision_array[idx] = vision_mapping[coord]
+                        if coord in unified_mapping:
+                            vision_array[idx] = unified_mapping[coord]
                         idx += 1
-                vision_input = vision_array
+                if idx > 0:
+                    vision_input = vision_array
             
-            if text_mapping:
-                # Convert text mapping to array format
+            # Extract X=2 (text) - Text face
+            if unified_mapping:
                 text_height, text_width = TEXT_FACE_SIZE
                 text_array = np.zeros((text_height * text_width, EMBED_DIM))
                 idx = 0
                 for y in range(text_height):
                     for z in range(text_width):
-                        coord = (1, y, z)
-                        if coord in text_mapping:
-                            text_array[idx] = text_mapping[coord]
+                        coord = (2, y, z)
+                        if coord in unified_mapping:
+                            text_array[idx] = unified_mapping[coord]
                         idx += 1
-                text_input = text_array
+                if idx > 0:
+                    text_input = text_array
             
             # For Stage 1 (Observation), we don't inject actions initially
             action_input = None
