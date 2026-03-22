@@ -261,4 +261,344 @@ class LLMGraphExecutor:
         Initialize LLM Graph Executor.
         
         Args:
-            grs: Graph Reasoning State to manage\n            goo: Graph of Operations for execution tracking\n        \"\"\"\n        self.grs = grs\n        self.goo = goo\n        \n        # Knowledge graph for storage (can be NetworkX or Cypher-based)\n        self.kg = nx.MultiDiGraph()\n        \n        # Query patterns\n        self.query_buffer: List[str] = []\n    \n    def analyze_state(self) -> Dict[str, Any]:\n        \"\"\"\n        Analyze current GRS state and determine next actions.\n        \n        Returns:\n            Analysis results with recommended actions\n        \"\"\"\n        active_thoughts = self.grs.get_active_thoughts()\n        completed_thoughts = self.grs.get_completed_thoughts()\n        \n        analysis = {\n            'num_active': len(active_thoughts),\n            'num_completed': len(completed_thoughts),\n            'needs_retrieval': False,\n            'needs_tool_call': False,\n            'needs_synthesis': False,\n            'missing_info': []\n        }\n        \n        # Check if we need more information\n        for thought in active_thoughts:\n            if thought.thought_type == ThoughtType.QUESTION:\n                # Check if answer exists\n                has_answer = any(t.thought_type == ThoughtType.ANSWER and \n                               t.parent_ids == [thought.id] \n                               for t in completed_thoughts)\n                if not has_answer:\n                    analysis['needs_retrieval'] = True\n                    analysis['missing_info'].append(thought.id)\n            \n            elif thought.thought_type == ThoughtType.REASONING:\n                # Check if we need tool execution\n                if 'requires_tool' in thought.metadata:\n                    analysis['needs_tool_call'] = True\n        \n        # Check if final synthesis is needed\n        if len(completed_thoughts) >= 3:\n            analysis['needs_synthesis'] = True\n        \n        return analysis\n    \n    def formulate_query(self, question: str) -> str:\n        \"\"\"\n        Formulate a knowledge graph query from a question.\n        \n        Args:\n            question: The question to query\n            \n        Returns:\n            Formulated query string\n        \"\"\"\n        # Simple keyword-based query formulation\n        query = f\"MATCH (a) WHERE a.content CONTAINS '{question}' RETURN a\"\n        self.query_buffer.append(query)\n        return query\n    \n    def execute_graph_operation(self, operation: str, params: Dict[str, Any]) -> str:\n        \"\"\"\n        Execute a graph management operation.\n        \n        Args:\n            operation: The operation to execute\n            params: Operation parameters\n            \n        Returns:\n            Operation result\n        \"\"\"\n        if operation == "create_thought":\n            node_id = self.grs.create_node(\n                content=params['content'],\n                thought_type=ThoughtType(params['thought_type']),\n                parent_ids=params.get('parent_ids')\n            )\n            return node_id\n        \n        elif operation == "update_status":\n            self.grs.update_node_status(\n                node_id=params['node_id'],\n                status=NodeStatus(params['status']),\n                metadata=params.get('metadata')\n            )\n            return \"updated\"\n        \n        elif operation == "add_to_kg":\n            # Add node to knowledge graph\n            self.kg.add_node(params['node_id'], **params.get('attributes', {}))\n            if 'relations' in params:\n                for rel in params['relations']:\n                    self.kg.add_edge(rel['from'], rel['to'], **rel.get('attributes', {}))\n            return \"added_to_kg\"\n        \n        return \"unknown_operation\"\n    \n    def plan_next_steps(self) -> List[Dict[str, Any]]:\n        \"\"\"\n        Plan the next steps based on current state.\n        \n        Returns:\n            List of planned operations\n        \"\"\"\n        analysis = self.analyze_state()\n        plans = []\n        \n        if analysis['needs_retrieval']:\n            for missing_id in analysis['missing_info'][:2]:  # Limit to 2\n                plans.append({\n                    'operation': 'create_thought',\n                    'params': {\n                        'content': f'Retrieve information for thought {missing_id}',\n                        'thought_type': 'retrieval',\n                        'parent_ids': [missing_id]\n                    },\n                    'priority': 10\n                })\n        \n        if analysis['needs_tool_call']:\n            plans.append({\n                'operation': 'create_thought',\n                'params': {\n                    'content': 'Execute tool for reasoning',\n                    'thought_type': 'tool_call',\n                },\n                'priority': 8\n            })\n        \n        if analysis['needs_synthesis']:\n            plans.append({\n                'operation': 'create_thought',\n                'params': {\n                    'content': 'Synthesize all reasoning into final answer',\n                    'thought_type': 'synthesis',\n                },\n                'priority': 5\n            })\n        \n        return plans\n\n\nclass LLMToolExecutor:\n    \"\"\"\n    Invokes external tools based on the Graph Executor's plan.\n    Part of the KGoT dual-executor architecture.\n    \"\"\"\n    \n    def __init__(self, tool_registry: Optional[Dict[str, callable]] = None):\n        \"\"\"\n        Initialize LLM Tool Executor.\n        \n        Args:\n            tool_registry: Dictionary of available tools {name: function}\n        \"\"\"\n        self.tool_registry = tool_registry or {}\n        self.execution_history: List[Dict[str, Any]] = []\n    \n    def register_tool(self, name: str, function: callable, description: str = \"\"):\n        \"\"\"\n        Register a new tool.\n        \n        Args:\n            name: Tool name\n            function: Tool function\n            description: Tool description\n        \"\"\"\n        self.tool_registry[name] = function\n    \n    def execute_tool(self, tool_name: str, **kwargs) -> Dict[str, Any]:\n        \"\"\"\n        Execute a tool.\n        \n        Args:\n            tool_name: Name of the tool to execute\n            **kwargs: Tool arguments\n            \n        Returns:\n            Tool execution result\n        \"\"\"\n        if tool_name not in self.tool_registry:\n            return {\n                'success': False,\n                'error': f'Tool {tool_name} not found',\n                'result': None\n            }\n        \n        try:\n            result = self.tool_registry[tool_name](**kwargs)\n            self.execution_history.append({\n                'tool': tool_name,\n                'args': kwargs,\n                'result': result,\n                'success': True\n            })\n            return {\n                'success': True,\n                'result': result\n            }\n        except Exception as e:\n            self.execution_history.append({\n                'tool': tool_name,\n                'args': kwargs,\n                'error': str(e),\n                'success': False\n            })\n            return {\n                'success': False,\n                'error': str(e),\n                'result': None\n            }\n    \n    def parse_tool_result(self, result: Dict[str, Any]) -> str:\n        \"\"\"\n        Parse tool result into structured format for KG.\n        \n        Args:\n            result: Raw tool result\n            \n        Returns:\n            Parsed result string\n        \"\"\"\n        if not result.get('success'):\n            return f\"Tool execution failed: {result.get('error')}\"\n        \n        return str(result.get('result', ''))\n\n\nclass CognitiveController:\n    \"\"\"\n    Main cognitive controller combining GoT and KGoT.\n    Orchestrates the dual-executor architecture.\n    \"\"\"\n    \n    def __init__(self):\n        \"\"\"Initialize the Cognitive Controller.\"\"\"\n        # Initialize components\n        self.grs = GraphReasoningState()\n        self.goo = GraphOfOperations(self.grs)\n        self.graph_executor = LLMGraphExecutor(self.grs, self.goo)\n        self.tool_executor = LLMToolExecutor()\n        \n        # State\n        self.current_task: Optional[str] = None\n        self.is_running = False\n    \n    def start_task(self, task: str):\n        \"\"\"\n        Start a new reasoning task.\n        \n        Args:\n            task: The task/question to reason about\n        \"\"\"\n        self.current_task = task\n        self.is_running = True\n        \n        # Create initial thought\n        root_id = self.grs.create_node(\n            content=task,\n            thought_type=ThoughtType.QUESTION\n        )\n        \n        # Plan next steps\n        plans = self.graph_executor.plan_next_steps()\n        for plan in plans:\n            self.goo.add_operation(plan['node_id'], plan['operation'], plan['priority'])\n    \n    def step(self) -> bool:\n        \"\"\"\n        Execute one step of reasoning.\n        \n        Returns:\n            True if more steps are needed, False if complete\n        \"\"\"\n        if not self.is_running:\n            return False\n        \n        # Get next operation\n        op = self.goo.get_next_operation()\n        if not op:\n            # Plan new operations\n            plans = self.graph_executor.plan_next_steps()\n            if not plans:\n                self.is_running = False\n                return False\n            \n            for plan in plans:\n                node_id = self.graph_executor.execute_graph_operation(\n                    plan['operation'], plan['params']\n                )\n                self.goo.add_operation(node_id, plan['operation'], plan['priority'])\n            return True\n        \n        # Execute the operation\n        self.graph_executor.execute_graph_operation(\n            op['operation'], \n            {'node_id': op['node_id'], 'status': 'processing'}\n        )\n        \n        return True\n    \n    def run(self, max_steps: int = 100) -> str:\n        \"\"\"\n        Run the reasoning process.\n        \n        Args:\n            max_steps: Maximum number of reasoning steps\n            \n        Returns:\n            Final aggregated result\n        \"\"\"\n        self.start_task(self.current_task or \"\")\n        \n        for _ in range(max_steps):\n            if not self.step():\n                break\n        \n        return self.grs.aggregate_thoughts()\n    \n    def get_state(self) -> Dict[str, Any]:\n        \"\"\"\n        Get current controller state.\n        \n        Returns:\n            Current state dictionary\n        \"\"\"\n        return {\n            'task': self.current_task,\n            'is_running': self.is_running,\n            'num_thoughts': len(self.grs.nodes),\n            'active_thoughts': len(self.grs.get_active_thoughts()),\n            'completed_thoughts': len(self.grs.get_completed_thoughts())\n        }
+            grs: Graph Reasoning State to manage
+            goo: Graph of Operations for execution tracking
+        """
+        self.grs = grs
+        self.goo = goo
+        
+        # Knowledge graph for storage (can be NetworkX or Cypher-based)
+        self.kg = nx.MultiDiGraph()
+        
+        # Query patterns
+        self.query_buffer: List[str] = []
+    
+    def analyze_state(self) -> Dict[str, Any]:
+        """
+        Analyze current GRS state and determine next actions.
+        
+        Returns:
+            Analysis results with recommended actions
+        """
+        active_thoughts = self.grs.get_active_thoughts()
+        completed_thoughts = self.grs.get_completed_thoughts()
+        
+        analysis = {
+            'num_active': len(active_thoughts),
+            'num_completed': len(completed_thoughts),
+            'needs_retrieval': False,
+            'needs_tool_call': False,
+            'needs_synthesis': False,
+            'missing_info': []
+        }
+        
+        # Check if we need more information
+        for thought in active_thoughts:
+            if thought.thought_type == ThoughtType.QUESTION:
+                # Check if answer exists
+                has_answer = any(t.thought_type == ThoughtType.ANSWER and 
+                               t.parent_ids == [thought.id] 
+                               for t in completed_thoughts)
+                if not has_answer:
+                    analysis['needs_retrieval'] = True
+                    analysis['missing_info'].append(thought.id)
+            
+            elif thought.thought_type == ThoughtType.REASONING:
+                # Check if we need tool execution
+                if 'requires_tool' in thought.metadata:
+                    analysis['needs_tool_call'] = True
+        
+        # Check if final synthesis is needed
+        if len(completed_thoughts) >= 3:
+            analysis['needs_synthesis'] = True
+        
+        return analysis
+    
+    def formulate_query(self, question: str) -> str:
+        """
+        Formulate a knowledge graph query from a question.
+        
+        Args:
+            question: The question to query
+            
+        Returns:
+            Formulated query string
+        """
+        # Simple keyword-based query formulation
+        query = f"MATCH (a) WHERE a.content CONTAINS '{question}' RETURN a"
+        self.query_buffer.append(query)
+        return query
+    
+    def execute_graph_operation(self, operation: str, params: Dict[str, Any]) -> str:
+        """
+        Execute a graph management operation.
+        
+        Args:
+            operation: The operation to execute
+            params: Operation parameters
+            
+        Returns:
+            Operation result
+        """
+        if operation == "create_thought":
+            node_id = self.grs.create_node(
+                content=params['content'],
+                thought_type=ThoughtType(params['thought_type']),
+                parent_ids=params.get('parent_ids')
+            )
+            return node_id
+        
+        elif operation == "update_status":
+            self.grs.update_node_status(
+                node_id=params['node_id'],
+                status=NodeStatus(params['status']),
+                metadata=params.get('metadata')
+            )
+            return "updated"
+        
+        elif operation == "add_to_kg":
+            # Add node to knowledge graph
+            self.kg.add_node(params['node_id'], **params.get('attributes', {}))
+            if 'relations' in params:
+                for rel in params['relations']:
+                    self.kg.add_edge(rel['from'], rel['to'], **rel.get('attributes', {}))
+            return "added_to_kg"
+        
+        return "unknown_operation"
+    
+    def plan_next_steps(self) -> List[Dict[str, Any]]:
+        """
+        Plan the next steps based on current state.
+        
+        Returns:
+            List of planned operations
+        """
+        analysis = self.analyze_state()
+        plans = []
+        
+        if analysis['needs_retrieval']:
+            for missing_id in analysis['missing_info'][:2]:  # Limit to 2
+                plans.append({
+                    'operation': 'create_thought',
+                    'params': {
+                        'content': f'Retrieve information for thought {missing_id}',
+                        'thought_type': 'retrieval',
+                        'parent_ids': [missing_id]
+                    },
+                    'priority': 10
+                })
+        
+        if analysis['needs_tool_call']:
+            plans.append({
+                'operation': 'create_thought',
+                'params': {
+                    'content': 'Execute tool for reasoning',
+                    'thought_type': 'tool_call',
+                },
+                'priority': 8
+            })
+        
+        if analysis['needs_synthesis']:
+            plans.append({
+                'operation': 'create_thought',
+                'params': {
+                    'content': 'Synthesize all reasoning into final answer',
+                    'thought_type': 'synthesis',
+                },
+                'priority': 5
+            })
+        
+        return plans
+
+
+class LLMToolExecutor:
+    """
+    Invokes external tools based on the Graph Executor's plan.
+    Part of the KGoT dual-executor architecture.
+    """
+    
+    def __init__(self, tool_registry: Optional[Dict[str, callable]] = None):
+        """
+        Initialize LLM Tool Executor.
+        
+        Args:
+            tool_registry: Dictionary of available tools {name: function}
+        """
+        self.tool_registry = tool_registry or {}
+        self.execution_history: List[Dict[str, Any]] = []
+    
+    def register_tool(self, name: str, function: callable, description: str = ""):
+        """
+        Register a new tool.
+        
+        Args:
+            name: Tool name
+            function: Tool function
+            description: Tool description
+        """
+        self.tool_registry[name] = function
+    
+    def execute_tool(self, tool_name: str, **kwargs) -> Dict[str, Any]:
+        """
+        Execute a tool.
+        
+        Args:
+            tool_name: Name of the tool to execute
+            **kwargs: Tool arguments
+            
+        Returns:
+            Tool execution result
+        """
+        if tool_name not in self.tool_registry:
+            return {
+                'success': False,
+                'error': f'Tool {tool_name} not found',
+                'result': None
+            }
+        
+        try:
+            result = self.tool_registry[tool_name](**kwargs)
+            self.execution_history.append({
+                'tool': tool_name,
+                'args': kwargs,
+                'result': result,
+                'success': True
+            })
+            return {
+                'success': True,
+                'result': result
+            }
+        except Exception as e:
+            self.execution_history.append({
+                'tool': tool_name,
+                'args': kwargs,
+                'error': str(e),
+                'success': False
+            })
+            return {
+                'success': False,
+                'error': str(e),
+                'result': None
+            }
+    
+    def parse_tool_result(self, result: Dict[str, Any]) -> str:
+        """
+        Parse tool result into structured format for KG.
+        
+        Args:
+            result: Raw tool result
+            
+        Returns:
+            Parsed result string
+        """
+        if not result.get('success'):
+            return f"Tool execution failed: {result.get('error')}"
+        
+        return str(result.get('result', ''))
+
+
+class CognitiveController:
+    """
+    Main cognitive controller combining GoT and KGoT.
+    Orchestrates the dual-executor architecture.
+    """
+    
+    def __init__(self):
+        """Initialize the Cognitive Controller."""
+        # Initialize components
+        self.grs = GraphReasoningState()
+        self.goo = GraphOfOperations(self.grs)
+        self.graph_executor = LLMGraphExecutor(self.grs, self.goo)
+        self.tool_executor = LLMToolExecutor()
+        
+        # State
+        self.current_task: Optional[str] = None
+        self.is_running = False
+    
+    def start_task(self, task: str):
+        """
+        Start a new reasoning task.
+        
+        Args:
+            task: The task/question to reason about
+        """
+        self.current_task = task
+        self.is_running = True
+        
+        # Create initial thought
+        root_id = self.grs.create_node(
+            content=task,
+            thought_type=ThoughtType.QUESTION
+        )
+        
+        # Plan next steps
+        plans = self.graph_executor.plan_next_steps()
+        for plan in plans:
+            self.goo.add_operation(plan['node_id'], plan['operation'], plan['priority'])
+    
+    def step(self) -> bool:
+        """
+        Execute one step of reasoning.
+        
+        Returns:
+            True if more steps are needed, False if complete
+        """
+        if not self.is_running:
+            return False
+        
+        # Get next operation
+        op = self.goo.get_next_operation()
+        if not op:
+            # Plan new operations
+            plans = self.graph_executor.plan_next_steps()
+            if not plans:
+                self.is_running = False
+                return False
+            
+            for plan in plans:
+                node_id = self.graph_executor.execute_graph_operation(
+                    plan['operation'], plan['params']
+                )
+                self.goo.add_operation(node_id, plan['operation'], plan['priority'])
+            return True
+        
+        # Execute the operation
+        self.graph_executor.execute_graph_operation(
+            op['operation'], 
+            {'node_id': op['node_id'], 'status': 'processing'}
+        )
+        
+        return True
+    
+    def run(self, max_steps: int = 100) -> str:
+        """
+        Run the reasoning process.
+        
+        Args:
+            max_steps: Maximum number of reasoning steps
+            
+        Returns:
+            Final aggregated result
+        """
+        self.start_task(self.current_task or "")
+        
+        for _ in range(max_steps):
+            if not self.step():
+                break
+        
+        return self.grs.aggregate_thoughts()
+    
+    def get_state(self) -> Dict[str, Any]:
+        """
+        Get current controller state.
+        
+        Returns:
+            Current state dictionary
+        """
+        return {
+            'task': self.current_task,
+            'is_running': self.is_running,
+            'num_thoughts': len(self.grs.nodes),
+            'active_thoughts': len(self.grs.get_active_thoughts()),
+            'completed_thoughts': len(self.grs.get_completed_thoughts())
+        }
