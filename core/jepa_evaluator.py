@@ -363,6 +363,18 @@ class JEPAEvaluator:
         else:
             error_trend = "insufficient_data"
         
+        # Extract per-epoch history for visualization
+        epoch_history = []
+        for eval_entry in self.evaluation_history:
+            epoch_history.append({
+                'epoch': eval_entry.get('epoch', 0),
+                'prediction_error': eval_entry.get('prediction_error', 0),
+                'memory_mb': eval_entry.get('memory_mb', 0),
+                'memory_increase_mb': eval_entry.get('memory_increase_mb', 0),
+                'is_converged': eval_entry.get('is_converged', False),
+                'timestamp': eval_entry.get('timestamp', 0)
+            })
+        
         report = {
             'overall_assessment': {
                 'is_converged': latest['is_converged'],
@@ -389,7 +401,8 @@ class JEPAEvaluator:
                 'temporal_profile_length': len(latest['temporal_profile'][0]) if latest['temporal_profile'][0] else 0,
                 'recent_error_trend': error_trend
             },
-            'evaluation_history_length': len(self.evaluation_history)
+            'evaluation_history_length': len(self.evaluation_history),
+            'epoch_history': epoch_history  # Per-epoch data for visualization
         }
         
         return report

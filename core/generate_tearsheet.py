@@ -498,11 +498,11 @@ def load_jepa_evaluation_report(filename: str = 'jepa_evaluation_report.json') -
 
 def create_jepa_performance_summary_plot(
     jepa_report: Dict, 
-    save_path: str = 'artifacts/performance_summary.png'
+    save_path: str = 'performance_summary.png'
 ):
     """
-    Create performance summary plot showing Prediction Error with spike highlighting
-    and Memory Usage proving O(1) stable scaling.
+    Create performance summary plot showing Prediction Error curve with spike highlighting
+    and Memory Usage curve proving O(1) stable scaling.
     
     Args:
         jepa_report: JEPA evaluation report dictionary
@@ -511,97 +511,183 @@ def create_jepa_performance_summary_plot(
     Returns:
         Path to saved figure
     """
-    # Ensure artifacts directory exists
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    # Ensure output directory exists
+    save_dir = os.path.dirname(save_path)
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
     
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
-    fig.suptitle('3D-RNG Code Generation Performance Summary', fontsize=14, fontweight='bold')
+    # Extract epoch history for per-epoch visualization
+    epoch_history = jepa_report.get('epoch_history', [])
     
-    # Extract data from report
-    overall = jepa_report.get('overall_assessment', {})
-    memory = jepa_report.get('memory_efficiency', {})
+    # If no epoch history, fall back to aggregated data
+    if not epoch_history:
+        print("Warning: No epoch history found. Using aggregated data.")
+        overall = jepa_report.get('overall_assessment', {})
+        memory = jepa_report.get('memory_efficiency', {})
+        
+        # Create single-value plots for fallback
+        fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+        fig.suptitle('3D-RNG Code Generation Performance Summary', fontsize=14, fontweight='bold')
+        
+        # Plot 1: Prediction Error (bar chart fallback)
+        ax1 = axes[0]
+        final_error = overall.get('final_prediction_error', 0)
+        best_error = overall.get('best_prediction_error', 0)
+        error_trend = overall.get('error_trend', 'unknown')
+        
+        error_labels = ['Final Prediction Error', 'Best Prediction Error']
+        error_values = [final_error, best_error]
+        colors = ['#e74c3c', '#27ae60']
+        
+        bars = ax1.bar(error_labels, error_values, color=colors, edgecolor='black', linewidth=1.2)
+        ax1.set_ylabel('Prediction Error', fontsize=12)
+        ax1.set_title('Prediction Error Analysis (Aggregated)', fontsize=11)
+        
+        for bar, val in zip(bars, error_values):
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{val:.6f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        
+        ax1.text(0.5, 0.95, f'Trend: {error_trend}', transform=ax1.transAxes,
+                ha='center', fontsize=10, 
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        ax1.grid(axis='y', alpha=0.3)
+        
+        # Plot 2: Memory Usage (bar chart fallback)
+        ax2 = axes[1]
+        current_memory = memory.get('current_memory_mb', 0)
+        memory_increase = memory.get('memory_increase_mb', 0)
+        scaling_quality = memory.get('memory_scaling_quality', 'unknown')
+        efficiency_ratio = memory.get('memory_efficiency_ratio', 1.0)
+        
+        memory_labels = ['Current Memory (MB)', 'Memory Increase (MB)']
+        memory_values = [current_memory, memory_increase]
+        
+        x_pos = np.arange(len(memory_labels))
+        bars2 = ax2.bar(x_pos, memory_values, color=['#3498db', '#9b59b6'], 
+                       edgecolor='black', linewidth=1.2, width=0.6)
+        
+        ax2.set_xticks(x_pos)
+        ax2.set_xticklabels(memory_labels)
+        ax2.set_ylabel('Memory (MB)', fontsize=12)
+        ax2.set_title(f'Memory Usage - O(1) Scaling: {scaling_quality}', fontsize=11)
+        
+        for bar, val in zip(bars2, memory_values):
+            height = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{val:.1f} MB', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        
+        ax2.text(0.5, 0.95, f'Efficiency Ratio: {efficiency_ratio:.4f}', 
+                transform=ax2.transAxes, ha='center', fontsize=10,
+                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
+        ax2.grid(axis='y', alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Saved JEPA performance summary to {save_path}")
+        return save_path
     
-    # Plot 1: Prediction Error with spike highlighting
+    # Extract per-epoch data
+    epochs = [e['epoch'] for e in epoch_history]
+    prediction_errors = [e['prediction_error'] for e in epoch_history]
+    memory_mb = [e['memory_mb'] for e in epoch_history]
+    
+    # Detect penalty spikes: where loss jumps by more than 15% from previous epoch
+    SPIKE_THRESHOLD = 0.15  # 15% increase
+    spike_indices = []
+    for i in range(1, len(prediction_errors)):
+        if prediction_errors[i-1] > 0:  # Avoid division by zero
+            relative_change = (prediction_errors[i] - prediction_errors[i-1]) / prediction_errors[i-1]
+            if relative_change > SPIKE_THRESHOLD:
+                spike_indices.append(i)
+    
+    # Create the figure with 2 subplots
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+    fig.suptitle('3D-RNG Code Generation Performance Summary\n(TDD Gradient Bridge Error Spikes & O(1) Memory Stability)', 
+                 fontsize=14, fontweight='bold')
+    
+    # Plot 1: Prediction Error Curve with Spike Highlighting
     ax1 = axes[0]
     
-    final_error = overall.get('final_prediction_error', 0)
-    best_error = overall.get('best_prediction_error', 0)
-    error_trend = overall.get('error_trend', 'unknown')
+    # Plot the main error curve
+    ax1.plot(epochs, prediction_errors, color='#2c3e50', linewidth=2, label='Prediction Error', marker='o', markersize=3)
     
-    # Create a bar chart for error metrics
-    error_labels = ['Final Prediction Error', 'Best Prediction Error']
-    error_values = [final_error, best_error]
-    colors = ['#e74c3c', '#27ae60']
+    # Highlight penalty spikes with red markers
+    if spike_indices:
+        spike_epochs = [epochs[i] for i in spike_indices]
+        spike_errors = [prediction_errors[i] for i in spike_indices]
+        ax1.scatter(spike_epochs, spike_errors, color='#e74c3c', s=150, zorder=5, 
+                   label=f'Penalty Spikes ({len(spike_indices)})', marker='^', edgecolors='black', linewidth=1.5)
+        
+        # Add annotations for spikes
+        for idx in spike_indices:
+            ax1.annotate(f'SPIKE\n+{int(((prediction_errors[idx] - prediction_errors[idx-1]) / prediction_errors[idx-1]) * 100)}%', 
+                        xy=(epochs[idx], prediction_errors[idx]),
+                        xytext=(epochs[idx], prediction_errors[idx] * 1.1),
+                        fontsize=8, color='red', fontweight='bold',
+                        ha='center', va='bottom',
+                        arrowprops=dict(arrowstyle='->', color='red', lw=1.5))
     
-    bars = ax1.bar(error_labels, error_values, color=colors, edgecolor='black', linewidth=1.2)
+    ax1.set_xlabel('Epoch', fontsize=12)
     ax1.set_ylabel('Prediction Error', fontsize=12)
-    ax1.set_title('Prediction Error Analysis\n(Spikes indicate Sandbox execution failures/penalties)', fontsize=11)
+    ax1.set_title('Prediction Error Curve\n(Highlighting TDD Gradient Bridge Penalty Spikes - Sandbox Execution Failures)', fontsize=11)
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.3)
     
-    # Add value labels on bars
-    for bar, val in zip(bars, error_values):
-        height = bar.get_height()
-        ax1.text(bar.get_x() + bar.get_width()/2., height,
-                f'{val:.6f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    # Add trend line
+    if len(epochs) > 1:
+        z = np.polyfit(epochs, prediction_errors, 1)
+        p = np.poly1d(z)
+        ax1.plot(epochs, p(epochs), '--', color='gray', alpha=0.7, label='Trend')
     
-    # Add trend annotation
-    ax1.text(0.5, 0.95, f'Trend: {error_trend}', transform=ax1.transAxes,
-            ha='center', fontsize=10, 
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # Highlight spikes (high error indicates sandbox failures)
-    if final_error > best_error * 1.5:
-        ax1.annotate('SPIKE OF PAIN\n(Sandbox failures)', 
-                    xy=(0, final_error), xytext=(0.25, final_error * 0.8),
-                    arrowprops=dict(arrowstyle='->', color='red', lw=2),
-                    fontsize=9, color='red', fontweight='bold')
-    
-    ax1.grid(axis='y', alpha=0.3)
-    
-    # Plot 2: Memory Usage to prove O(1) stable scaling
+    # Plot 2: Memory Usage Curve proving O(1) stability
     ax2 = axes[1]
     
-    current_memory = memory.get('current_memory_mb', 0)
-    memory_increase = memory.get('memory_increase_mb', 0)
-    scaling_quality = memory.get('memory_scaling_quality', 'unknown')
-    efficiency_ratio = memory.get('memory_efficiency_ratio', 1.0)
+    ax2.plot(epochs, memory_mb, color='#3498db', linewidth=2, label='Memory Usage (MB)', marker='s', markersize=3)
     
-    # Create memory metrics visualization
-    memory_labels = ['Current Memory (MB)', 'Memory Increase (MB)']
-    memory_values = [current_memory, memory_increase]
+    # Calculate and display O(1) stability metrics
+    if len(memory_mb) > 1:
+        memory_variance = np.var(memory_mb)
+        memory_std = np.std(memory_mb)
+        memory_mean = np.mean(memory_mb)
+        
+        # Coefficient of variation (lower = more stable)
+        cv = memory_std / memory_mean if memory_mean > 0 else float('inf')
+        
+        # Add stability annotation
+        stability_text = f'O(1) Stability: {"STABLE" if cv < 0.1 else "SUB-LINEAR" if cv < 0.5 else "LINEAR"}\n'
+        stability_text += f'Mean: {memory_mean:.1f}MB | Std: {memory_std:.1f}MB | CV: {cv:.3f}'
+        
+        ax2.text(0.02, 0.95, stability_text, transform=ax2.transAxes,
+                fontsize=10, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='lightgreen' if cv < 0.1 else 'lightyellow', alpha=0.7))
     
-    x_pos = np.arange(len(memory_labels))
-    bars2 = ax2.bar(x_pos, memory_values, color=['#3498db', '#9b59b6'], 
-                   edgecolor='black', linewidth=1.2, width=0.6)
+    # Add horizontal line for baseline memory
+    if memory_mb:
+        ax2.axhline(y=memory_mb[0], color='gray', linestyle='--', alpha=0.5, label=f'Baseline: {memory_mb[0]:.1f}MB')
     
-    ax2.set_xticks(x_pos)
-    ax2.set_xticklabels(memory_labels)
-    ax2.set_ylabel('Memory (MB)', fontsize=12)
-    ax2.set_title(f'Memory Usage - Proving O(1) Stable Scaling\n(Scaling Quality: {scaling_quality})', fontsize=11)
-    
-    # Add value labels
-    for bar, val in zip(bars2, memory_values):
-        height = bar.get_height()
-        ax2.text(bar.get_x() + bar.get_width()/2., height,
-                f'{val:.1f} MB', ha='center', va='bottom', fontsize=10, fontweight='bold')
-    
-    # Add efficiency ratio annotation
-    ax2.text(0.5, 0.95, f'Efficiency Ratio: {efficiency_ratio:.4f} (< 0.1 = O(1))', 
-            transform=ax2.transAxes, ha='center', fontsize=10,
-            bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
-    
-    ax2.grid(axis='y', alpha=0.3)
+    ax2.set_xlabel('Epoch', fontsize=12)
+    ax2.set_ylabel('Memory Usage (MB)', fontsize=12)
+    ax2.set_title('Memory Usage Profile\n(Proving O(1) Memory Stability Across Epochs)', fontsize=11)
+    ax2.legend(loc='upper right')
+    ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     
     print(f"Saved JEPA performance summary to {save_path}")
+    if spike_indices:
+        print(f"Detected {len(spike_indices)} penalty spikes (>15% error increase)")
+    
     return save_path
 
 
 def create_jepa_regime_analysis_plot(
     jepa_report: Dict,
-    save_path: str = 'artifacts/regime_analysis.png'
+    save_path: str = 'regime_analysis.png'
 ):
     """
     Create regime analysis plot showing spatial error distribution and convergence.
@@ -613,8 +699,10 @@ def create_jepa_regime_analysis_plot(
     Returns:
         Path to saved figure
     """
-    # Ensure artifacts directory exists
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    # Ensure output directory exists
+    save_dir = os.path.dirname(save_path)
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle('3D-RNG Code Generation Regime Analysis', fontsize=14, fontweight='bold')
