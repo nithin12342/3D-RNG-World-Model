@@ -23,6 +23,14 @@ except ImportError:
     MOE_AVAILABLE = False
     print("Warning: MoE layer not available.")
 
+# Import LocalOptimizerBridge for Hebbian gradient learning
+try:
+    from core.optimization import LocalOptimizerBridge
+    OPTIMIZATION_AVAILABLE = True
+except ImportError:
+    OPTIMIZATION_AVAILABLE = False
+    print("Warning: LocalOptimizerBridge not available.")
+
 # Import Neurosymbolic modules for composition
 try:
     from core.cognitive_controller import CognitiveController as CognitiveControllerBase
@@ -879,11 +887,22 @@ class PredictiveCodingWorldCore:
                 capacity_factor=1.25,
                 eval_capacity_factor=2.0
             )
-            self.moe_layer.eval()
+            # Set to train mode to enable gradient computation
+            self.moe_layer.train()
             print(f"  PredictiveCodingWorldCore MoE: Enabled ({num_experts} experts, k={moe_k})")
         else:
             self.moe_layer = None
             print(f"  PredictiveCodingWorldCore MoE: Disabled")
+        
+        # Initialize LocalOptimizerBridge for Hebbian gradient learning
+        self.optimizer_bridge: Optional[LocalOptimizerBridge] = None
+        self._moe_output_pt: Optional[torch.Tensor] = None  # Store PyTorch output for gradient computation
+        if OPTIMIZATION_AVAILABLE and self.use_moe and self.moe_layer is not None:
+            self.optimizer_bridge = LocalOptimizerBridge(
+                moe_parameters=list(self.moe_layer.parameters()),
+                learning_rate=1e-3
+            )
+            print(f"  LocalOptimizerBridge: Initialized for MoE gradients")
         
         # Define multi-modal injection zones
         # Vision face: x=0 plane (visual input)
@@ -1102,21 +1121,27 @@ class PredictiveCodingWorldCore:
             node.update_state_continuous(incoming_state, self.shared_weights, activation='tanh')
         
         # --- SPARSE MoE DYNAMIC ROUTING ---
+        # NOTE: Removed torch.no_grad() to enable gradient computation for Hebbian learning
         if hasattr(self, 'moe_layer') and self.moe_layer is not None:
             # Gather states and convert to PyTorch
             node_coords = list(self.nodes.keys())
             states_np = np.array([self.nodes[c].hidden_state for c in node_coords])
             states_pt = torch.from_numpy(states_np).float().unsqueeze(1)  # Add seq dim
             
-            # Route through MoE experts
-            with torch.no_grad():
-                moe_out = self.moe_layer(states_pt).squeeze(1).numpy()
+            # Route through MoE experts - UNFROZEN for gradient computation
+            moe_out_pt = self.moe_layer(states_pt)  # Keep as PyTorch tensor for gradient tracking
+            
+            # Store the PyTorch tensor output for gradient computation during error phase
+            self._moe_output_pt = moe_out_pt.detach().requires_grad_(True)
+            
+            # Convert to NumPy for physics engine (detached from graph)
+            moe_out_np = self._moe_output_pt.detach().squeeze(1).numpy()
             
             # Update states and store block representations
             for i, coord in enumerate(node_coords):
-                self.nodes[coord].hidden_state = moe_out[i]
+                self.nodes[coord].hidden_state = moe_out_np[i]
                 # Store representation for block attention history
-                self.nodes[coord].store_block_representation(moe_out[i])
+                self.nodes[coord].store_block_representation(moe_out_np[i])
         # --- END MoE ROUTING ---
         
         # --- ACTIVE ENGINE: HARD-ZERO SPATIAL OVERRIDE (NUMPY) ---
@@ -1154,6 +1179,52 @@ class PredictiveCodingWorldCore:
                 node.update_prediction_errors(actual_neighbor_states_dict[coord])
                 # Update connection weights based on errors
                 node.update_connection_weights()
+        
+        # --- LOCAL HEBBIAN GRADIENT BRIDGE ---
+        # Apply localized gradients using the stored MoE output and local prediction errors
+        # This enables O(1) memory scaling by immediately calling backward() and step()
+        if self.optimizer_bridge is not None and self._moe_output_pt is not None:
+            # Calculate local target states from prediction errors for each node
+            # The target is: current_state - prediction_error (corrective signal)
+            node_coords = list(self.nodes.keys())
+            
+            # Create target tensor from prediction errors
+            target_states = []
+            for coord in node_coords:
+                node = self.nodes[coord]
+                # Get aggregate prediction error for this node
+                if coord in node.prediction_errors and len(node.prediction_errors) > 0:
+                    # Use the mean prediction error as the correction signal
+                    errors = list(node.prediction_errors.values())
+                    mean_error = np.mean(errors, axis=0)
+                    # Target = current state - error (to reduce error)
+                    target = node.hidden_state - mean_error
+                else:
+                    # No prediction error available, use current state as target
+                    target = node.hidden_state
+                target_states.append(target)
+            
+            # Convert target to PyTorch tensor
+            target_np = np.array(target_states)
+            target_pt = torch.from_numpy(target_np).float().unsqueeze(1)
+            
+            # Apply local gradients using the bridge
+            # This computes MSE between MoE output and target, then backward() + step()
+            try:
+                local_loss = self.optimizer_bridge.apply_moe_gradients(
+                    self._moe_output_pt,
+                    target_pt
+                )
+                # Clear stored output after gradient application
+                self._moe_output_pt = None
+                if hasattr(self, '_debug_logging') and self._debug_logging:
+                    print(f"  [Hebbian] Local gradient applied, loss: {local_loss:.6f}")
+            except Exception as e:
+                # If gradient application fails, clear stored output and continue
+                self._moe_output_pt = None
+                if hasattr(self, '_debug_logging') and self._debug_logging:
+                    print(f"  [Hebbian] Gradient application warning: {e}")
+        # --- END HEBBIAN GRADIENT BRIDGE ---
         
         # Step 6: Apply refractory periods based on aggregate prediction error
         for coord, node in self.nodes.items():
