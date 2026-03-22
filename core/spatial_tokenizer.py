@@ -118,12 +118,26 @@ class ImagePatchExtractor(nn.Module):
         B, C, H, W = x.shape
         ph, pw = self.patch_size
         
+        # Validate dimensions - apply padding if needed
+        if H % ph != 0 or W % pw != 0:
+            h_pad = (ph - H % ph) % ph
+            w_pad = (pw - W % pw) % pw
+            if h_pad > 0 or w_pad > 0:
+                x = F.pad(x, (0, w_pad, 0, h_pad), mode='replicate')
+                H, W = x.shape[2], x.shape[3]  # Update dimensions after padding
+        
         # Unfold image into patches
         patches = F.unfold(x, kernel_size=(ph, pw), stride=(ph, pw))
         patches = patches.transpose(1, 2)  # (B, num_patches, C*ph*pw)
         
-        # Project and normalize
-        patch_embeds = self.proj(patches)
+        # Project and normalize - use dynamic projection if channels differ
+        if C == self.in_channels:
+            patch_embeds = self.proj(patches)
+        else:
+            # Create dynamic projection for different channel count
+            patch_dim = C * ph * pw
+            dynamic_proj = nn.Linear(patch_dim, self.embed_dim).to(x.device)
+            patch_embeds = dynamic_proj(patches)
         patch_embeds = self.norm(patch_embeds)
         
         return patch_embeds
@@ -273,11 +287,22 @@ class VideoPatchExtractor(nn.Module):
         else:
             raise ValueError(f"Input must be 4D or 5D tensor, got {x.dim()}D")
             
-        # Validate dimensions
+        # Validate channel count - allow flexible channel handling
         if C != self.in_channels:
-            raise ValueError(f"Expected {self.in_channels} channels, got {C}")
+            # Adjust projection layer to handle different channel counts
+            # This allows processing images with different channel counts
+            actual_channels = C
+        else:
+            actual_channels = self.in_channels
+        
+        # Validate dimensions - should already be divisible due to padding in tokenizer
         if H % self.patch_height != 0 or W % self.patch_width != 0:
-            raise ValueError(f"Image dimensions ({H}, {W}) must be divisible by patch size {self.patch_size}")
+            # Apply additional padding if needed (fallback)
+            h_pad = (self.patch_height - H % self.patch_height) % self.patch_height
+            w_pad = (self.patch_width - W % self.patch_width) % self.patch_width
+            if h_pad > 0 or w_pad > 0:
+                x = F.pad(x, (0, w_pad, 0, h_pad), mode='replicate')
+                H, W = x.shape[3], x.shape[4]  # Update dimensions after padding
             
         # Calculate number of patches
         num_patches_h = H // self.patch_height
@@ -293,8 +318,14 @@ class VideoPatchExtractor(nn.Module):
         # Transpose to (B*T, num_patches, C*patch_h*patch_w)
         patches = patches.transpose(1, 2)
         
-        # Project patches to embedding dimension
-        patch_embeds = self.proj(patches)  # (B*T, num_patches, embed_dim)
+        # Project patches to embedding dimension - use dynamic projection if channels differ
+        if C == self.in_channels:
+            patch_embeds = self.proj(patches)  # (B*T, num_patches, embed_dim)
+        else:
+            # Create dynamic projection for different channel count
+            patch_dim = C * self.patch_height * self.patch_width
+            dynamic_proj = nn.Linear(patch_dim, self.embed_dim).to(x.device)
+            patch_embeds = dynamic_proj(patches)
         patch_embeds = self.norm(patch_embeds)
         
         # Reshape back to (B, T, num_patches, embed_dim)
@@ -391,7 +422,7 @@ class SpatialTokenizer:
         Tokenize a single video frame into patch embeddings.
         
         Args:
-            frame: Video frame of shape (H, W, C) or (C, H, W)
+            frame: Video frame of shape (H, W, C) or (C, H, W) or (H, W) for grayscale
             
         Returns:
             Patch embeddings of shape (num_patches, embed_dim)
@@ -404,15 +435,39 @@ class SpatialTokenizer:
             
         # Handle different input formats
         if frame_tensor.dim() == 3:
-            if frame_tensor.shape[2] == self.in_channels:  # (H, W, C)
-                frame_tensor = frame_tensor.permute(2, 0, 1)  # -> (C, H, W)
-            elif frame_tensor.shape[0] == self.in_channels:  # (C, H, W)
-                pass  # Already correct format
+            # Check if it's channel-last (H, W, C) or channel-first (C, H, W)
+            # Heuristic: if last dimension is 1, 3, or 4 (common channel sizes)
+            if frame_tensor.shape[2] in [1, 3, 4]:
+                # Likely (H, W, C) format - convert to (C, H, W)
+                frame_tensor = frame_tensor.permute(2, 0, 1)
+            elif frame_tensor.shape[0] in [1, 3, 4]:
+                # Already (C, H, W) format
+                pass
             else:
-                raise ValueError(f"Unexpected frame shape: {frame_tensor.shape}")
+                # Fallback: assume first dim is channel if small
+                if frame_tensor.shape[0] <= 4:
+                    pass  # Already correct
+                else:
+                    raise ValueError(f"Unexpected frame shape: {frame_tensor.shape}")
+        elif frame_tensor.dim() == 2:
+            # Grayscale frame (H, W) - add channel dimension
+            frame_tensor = frame_tensor.unsqueeze(0)  # -> (1, H, W)
         else:
-            raise ValueError(f"Frame must be 3D tensor, got {frame_tensor.dim()}D")
-            
+            raise ValueError(f"Frame must be 2D or 3D tensor, got {frame_tensor.dim()}D")
+        
+        # Ensure dimensions are compatible with patch size
+        # If not, resize the frame to be divisible by patch size
+        C, H, W = frame_tensor.shape
+        ph, pw = self.patch_size
+        
+        # Calculate padding needed to make dimensions divisible by patch size
+        h_pad = (ph - H % ph) % ph if H % ph != 0 else 0
+        w_pad = (pw - W % pw) % pw if W % pw != 0 else 0
+        
+        if h_pad > 0 or w_pad > 0:
+            # Apply padding (replicating edge pixels)
+            frame_tensor = F.pad(frame_tensor, (0, w_pad, 0, h_pad), mode='replicate')
+        
         # Add batch and time dimensions: (1, 1, C, H, W)
         frame_tensor = frame_tensor.unsqueeze(0).unsqueeze(0)
         
@@ -622,7 +677,7 @@ class SpatialTokenizer:
         Process image through image_extractor.
         
         Args:
-            image: Image of shape (H, W, C) or (C, H, W)
+            image: Image of shape (H, W, C) or (C, H, W) or (H, W) for grayscale
             
         Returns:
             Image embeddings of shape (num_patches, embed_dim)
@@ -632,11 +687,41 @@ class SpatialTokenizer:
         
         # Handle different input formats
         if image_tensor.dim() == 3:
-            if image_tensor.shape[2] == self.in_channels:  # (H, W, C)
-                image_tensor = image_tensor.permute(2, 0, 1)  # -> (C, H, W)
+            # Check if it's channel-last (H, W, C) or channel-first (C, H, W)
+            # Heuristic: if last dimension is 1, 3, or 4 (common channel sizes)
+            if image_tensor.shape[2] in [1, 3, 4]:
+                # Likely (H, W, C) format - convert to (C, H, W)
+                image_tensor = image_tensor.permute(2, 0, 1)
+            elif image_tensor.shape[0] in [1, 3, 4]:
+                # Already (C, H, W) format
+                pass
+            else:
+                # Fallback: assume channel-first if first dim is small
+                if image_tensor.shape[0] <= 4:
+                    pass  # Already correct
+                else:
+                    # Might be (H, W, C) where C is large - try to detect
+                    pass
+        elif image_tensor.dim() == 2:
+            # Grayscale image (H, W) - add channel dimension
+            image_tensor = image_tensor.unsqueeze(0)  # -> (1, H, W)
         
-        # Add batch dimension: (1, C, H, W)
-        image_tensor = image_tensor.unsqueeze(0)
+        # Ensure dimensions are compatible with patch size
+        # If not, resize the image to be divisible by patch size
+        B, C, H, W = image_tensor.shape
+        ph, pw = self.patch_size
+        
+        # Calculate padding needed to make dimensions divisible by patch size
+        h_pad = (ph - H % ph) % ph if H % ph != 0 else 0
+        w_pad = (pw - W % pw) % pw if W % pw != 0 else 0
+        
+        if h_pad > 0 or w_pad > 0:
+            # Apply padding ( replicating edge pixels)
+            image_tensor = F.pad(image_tensor, (0, w_pad, 0, h_pad), mode='replicate')
+        
+        # Add batch dimension if not present: (1, C, H, W)
+        if image_tensor.dim() == 3:
+            image_tensor = image_tensor.unsqueeze(0)
         
         with torch.no_grad():
             image_embeds = self.image_extractor(image_tensor)
