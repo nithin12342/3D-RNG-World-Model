@@ -900,9 +900,10 @@ class PredictiveCodingWorldCore:
         if OPTIMIZATION_AVAILABLE and self.use_moe and self.moe_layer is not None:
             self.optimizer_bridge = LocalOptimizerBridge(
                 moe_parameters=list(self.moe_layer.parameters()),
-                learning_rate=1e-3
+                learning_rate=1e-3,
+                embed_dim=hidden_size
             )
-            print(f"  LocalOptimizerBridge: Initialized for MoE gradients")
+            print(f"  LocalOptimizerBridge: Initialized for MoE gradients with D-MMD")
         
         # Define multi-modal injection zones
         # Vision face: x=0 plane (visual input)
@@ -952,6 +953,11 @@ class PredictiveCodingWorldCore:
         # Initialize Vector Decoder for bridging tensor states to LLM string inputs
         self.vector_decoder = VectorDecoder(hidden_size=hidden_size)
         print(f"  Vector Decoder: Initialized")
+        
+        # === D-MMD Teacher-Student State ===
+        # Tick counter for periodic D-MMD distillation (every 5th tick)
+        self.tick_count: int = 0
+        self.d_mmd_distillation_interval: int = 5
         
         # Define KG face (X=4) and Agentic face (X=5) coordinates
         # These planes will store knowledge graph and agentic tool state
@@ -1144,6 +1150,57 @@ class PredictiveCodingWorldCore:
                 # Store representation for block attention history
                 self.nodes[coord].store_block_representation(moe_out_np[i])
         # --- END MoE ROUTING ---
+        
+        # === D-MMD TEACHER-STUDENT DISTILLATION ===
+        # Every 5th tick, perform distillation from SC-MCTS teacher to MoE student
+        self.tick_count += 1
+        if self.tick_count % self.d_mmd_distillation_interval == 0:
+            if self.optimizer_bridge is not None and self._moe_output_pt is not None:
+                try:
+                    # === Generate Teacher Target via SC-MCTS ===
+                    # Use cognitive controller with KG to generate high-quality target
+                    teacher_target_np = None
+                    if hasattr(self, 'kg') and self.kg is not None and hasattr(self.kg, 'mcts'):
+                        # Generate a reasoning query based on current hidden states
+                        # Get average hidden state as query representation
+                        avg_hidden = np.mean([n.hidden_state for n in self.nodes.values()], axis=0)
+                        query_magnitude = float(np.linalg.norm(avg_hidden))
+                        
+                        # Create a query for SC-MCTS
+                        query = f"reasoning_depth_{int(query_magnitude * 100)}"
+                        
+                        # Run SC-MCTS search to get reasoning path
+                        context = {"hidden_states": avg_hidden}
+                        paths, _ = self.kg.mcts.search(start_node_id=0, query=query, context=context)
+                        
+                        # Extract target logits from SC-MCTS reasoning path
+                        if paths and len(paths) > 0:
+                            # Use the best path's final state as teacher target
+                            best_path = paths[0]
+                            teacher_target_np = np.array(best_path.get('value', avg_hidden))
+                    
+                    # If no KG/MCTS available, fall back to using current MoE output as target
+                    # (essentially self-distillation for initialization)
+                    if teacher_target_np is None:
+                        teacher_target_np = self._moe_output_pt.detach().cpu().numpy()
+                    
+                    # Convert teacher target to PyTorch tensor with matching shape
+                    teacher_target_pt = torch.from_numpy(teacher_target_np).float()
+                    
+                    # Ensure shape matches student output
+                    if teacher_target_pt.dim() == 2:
+                        teacher_target_pt = teacher_target_pt.unsqueeze(1)  # Add seq dim
+                    
+                    # Apply D-MMD gradients (Student-Teacher entropy cancellation)
+                    d_mmd_loss = self.optimizer_bridge.apply_d_mmd_gradients(
+                        self._moe_output_pt,
+                        teacher_target_pt
+                    )
+                    print(f"  [D-MMD] Tick {self.tick_count}: distillation loss = {d_mmd_loss:.6f}")
+                    
+                except Exception as e:
+                    print(f"  [D-MMD] Warning: distillation failed: {e}")
+        # === END D-MMD DISTILLATION ===
         
         # --- ACTIVE ENGINE: HARD-ZERO SPATIAL OVERRIDE (NUMPY) ---
         # 1. Extract all hidden states and their magnitudes

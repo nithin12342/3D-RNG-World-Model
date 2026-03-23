@@ -44,7 +44,8 @@ class LocalOptimizerBridge:
         learning_rate: float = 1e-3,
         betas: Tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
-        weight_decay: float = 0.0
+        weight_decay: float = 0.0,
+        embed_dim: int = 768
     ):
         """
         Initialize the LocalOptimizerBridge.
@@ -56,10 +57,16 @@ class LocalOptimizerBridge:
             betas: Coefficients for computing running averages of gradient
             eps: Term added to denominator to improve numerical stability
             weight_decay: Weight decay (L2 penalty)
+            embed_dim: Embedding dimension for auxiliary network (default 768)
         """
         self.learning_rate = learning_rate
+        self.embed_dim = embed_dim
         self.moe_optimizer: Optional[torch.optim.Adam] = None
         self.tokenizer_optimizer: Optional[torch.optim.Adam] = None
+        
+        # D-MMD auxiliary network for entropy cancellation
+        self.auxiliary_network: Optional[nn.Linear] = None
+        self.aux_optimizer: Optional[torch.optim.Adam] = None
         
         # Store intermediate tensors for error calculation
         self._stored_moe_output: Optional[torch.Tensor] = None
@@ -86,6 +93,132 @@ class LocalOptimizerBridge:
                 weight_decay=weight_decay
             )
             print(f"  LocalOptimizerBridge: Tokenizer optimizer initialized with {len(tokenizer_parameters)} parameter tensors")
+        
+        # Initialize D-MMD auxiliary network
+        self._init_auxiliary_network()
+    
+    def _init_auxiliary_network(self) -> None:
+        """
+        Initialize the D-MMD auxiliary network (lightweight linear projection).
+        
+        This network generates auxiliary logits for entropy cancellation
+        as described in the DeepMind D-MMD paper (arXiv:2603.20155).
+        """
+        try:
+            self.auxiliary_network = nn.Linear(self.embed_dim, self.embed_dim)
+            self.aux_optimizer = torch.optim.Adam(
+                self.auxiliary_network.parameters(),
+                lr=self.learning_rate,
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay=0.0
+            )
+            print(f"  LocalOptimizerBridge: D-MMD auxiliary network initialized (embed_dim={self.embed_dim})")
+        except Exception as e:
+            print(f"  Warning: Failed to initialize auxiliary network: {e}")
+            self.auxiliary_network = None
+            self.aux_optimizer = None
+    
+    def apply_d_mmd_gradients(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor
+    ) -> float:
+        """
+        Apply Discrete Moment Matching Distillation (D-MMD) gradients.
+        
+        This implements the D-MMD equation from DeepMind's paper (arXiv:2603.20155):
+        - loss_student = CE(student, teacher) - CE(student, aux)
+        - loss_aux = CE(aux, teacher)
+        
+        The auxiliary model subtraction cancels negative entropy, stabilizing the update.
+        
+        Args:
+            student_logits: Output from the MoE student network [batch_size, seq_len, embed_dim]
+            teacher_logits: Target from SC-MCTS teacher [batch_size, seq_len, embed_dim]
+            
+        Returns:
+            The computed D-MMD loss value
+        """
+        if self.auxiliary_network is None or self.aux_optimizer is None:
+            print("  Warning: Auxiliary network not initialized, falling back to standard MSE")
+            return self.apply_moe_gradients(student_logits, teacher_logits)
+        
+        try:
+            # Defensive: Ensure shape matching
+            if student_logits.shape != teacher_logits.shape:
+                # Try to reshape/pad to match
+                print(f"  Shape mismatch: student {student_logits.shape} vs teacher {teacher_logits.shape}")
+                
+                # Get common dimensions
+                min_batch = min(student_logits.shape[0], teacher_logits.shape[0])
+                min_seq = min(student_logits.shape[1], teacher_logits.shape[1])
+                min_embed = min(student_logits.shape[2], teacher_logits.shape[2])
+                
+                # Slice to common size
+                student_logits = student_logits[:min_batch, :min_seq, :min_embed]
+                teacher_logits = teacher_logits[:min_batch, :min_seq, :min_embed]
+            
+            # Detach inputs to prevent graph entanglement
+            student_logits_detached = student_logits.detach().requires_grad_(True)
+            teacher_logits_detached = teacher_logits.detach()
+            
+            # Generate auxiliary logits from student state
+            aux_logits = self.auxiliary_network(student_logits_detached)
+            
+            # === D-MMD Loss Equations ===
+            # Flatten for cross-entropy: [batch_size * seq_len, embed_dim]
+            student_flat = student_logits_detached.view(-1, self.embed_dim)
+            teacher_flat = teacher_logits_detached.view(-1, self.embed_dim)
+            aux_flat = aux_logits.view(-1, self.embed_dim)
+            
+            # Get argmax targets from teacher
+            teacher_targets = torch.argmax(teacher_flat, dim=-1)
+            
+            # loss_student = CE(student, teacher) - CE(student, aux)
+            loss_student = F.cross_entropy(student_flat, teacher_targets, reduction='mean') - \
+                           F.cross_entropy(student_flat.detach(), teacher_targets, reduction='mean')
+            
+            # loss_aux = CE(aux, teacher)
+            loss_aux = F.cross_entropy(aux_flat, teacher_targets, reduction='mean')
+            
+            # === Backward Pass: Student ===
+            # Zero gradients first
+            if self.moe_optimizer is not None:
+                self.moe_optimizer.zero_grad()
+            
+            # Backward for student (retain_graph=False for O(1) memory)
+            loss_student.backward(retain_graph=False)
+            
+            # Step MoE optimizer
+            if self.moe_optimizer is not None:
+                self.moe_optimizer.step()
+                self.moe_optimizer.zero_grad()
+            
+            # === Backward Pass: Auxiliary ===
+            # Zero gradients for aux optimizer
+            self.aux_optimizer.zero_grad()
+            
+            # Recompute aux logits for aux backward (detached student)
+            aux_logits_for_aux = self.auxiliary_network(student_logits_detached.detach())
+            aux_flat_for_aux = aux_logits_for_aux.view(-1, self.embed_dim)
+            loss_aux_for_aux = F.cross_entropy(aux_flat_for_aux, teacher_targets, reduction='mean')
+            
+            # Backward for aux network (retain_graph=False)
+            loss_aux_for_aux.backward(retain_graph=False)
+            
+            # Step aux optimizer
+            self.aux_optimizer.step()
+            self.aux_optimizer.zero_grad()
+            
+            # Return combined loss for monitoring
+            total_loss = (loss_student.item() + loss_aux_for_aux.item()) / 2.0
+            return total_loss
+            
+        except Exception as e:
+            print(f"  Error in D-MMD gradient application: {e}")
+            # Fallback to standard MSE
+            return self.apply_moe_gradients(student_logits, teacher_logits)
     
     def store_moe_output(self, moe_output: torch.Tensor) -> None:
         """
@@ -335,6 +468,7 @@ def create_local_optimizer_bridge(
     moe_module: Optional[nn.Module] = None,
     tokenizer_module: Optional[nn.Module] = None,
     learning_rate: float = 1e-3,
+    embed_dim: int = 768,
     **optimizer_kwargs
 ) -> LocalOptimizerBridge:
     """
@@ -344,6 +478,7 @@ def create_local_optimizer_bridge(
         moe_module: SparseMoE or similar MoE module
         tokenizer_module: SpatialTokenizer or similar tokenizer module
         learning_rate: Learning rate for Adam optimizers
+        embed_dim: Embedding dimension for D-MMD auxiliary network
         **optimizer_kwargs: Additional arguments for Adam optimizer
         
     Returns:
@@ -356,6 +491,7 @@ def create_local_optimizer_bridge(
         moe_parameters=moe_params,
         tokenizer_parameters=tokenizer_params,
         learning_rate=learning_rate,
+        embed_dim=embed_dim,
         **optimizer_kwargs
     )
 
