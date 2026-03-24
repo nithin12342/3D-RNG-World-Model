@@ -314,7 +314,11 @@ class SparseMoE(nn.Module):
         if not is_batched:
             output = output.squeeze(1)
         
-        return output
+        # Calculate confidence score from gating weights (epistemic uncertainty)
+        # Use the maximum routing probability per token, then average across batch
+        confidence_score = gating_weights.max(dim=-1)[0].mean().item()
+        
+        return output, confidence_score
     
     def get_expert_utilization(self) -> torch.Tensor:
         """

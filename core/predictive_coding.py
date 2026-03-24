@@ -1135,7 +1135,53 @@ class PredictiveCodingWorldCore:
             states_pt = torch.from_numpy(states_np).float().unsqueeze(1)  # Add seq dim
             
             # Route through MoE experts - UNFROZEN for gradient computation
-            moe_out_pt = self.moe_layer(states_pt)
+            # Returns (output_tensor, confidence_score) for dynamic compute scaling
+            moe_out_pt, confidence = self.moe_layer(states_pt)
+            
+            # Log routing confidence for monitoring
+            print(f"[Cognition] Fast-Routing Confidence: {confidence:.2f}")
+            
+            # === DYNAMIC TEST-TIME COMPUTE (o1 PARADIGM) ===
+            # If confidence is below threshold, engage deep SC-MCTS planning
+            if confidence < 0.85:
+                print("[Cognition] High Uncertainty Detected. Engaging Deep SC-MCTS Planning...")
+                
+                # Generate teacher target via SC-MCTS (same pattern as D-MMD)
+                teacher_target_np = None
+                if hasattr(self, 'kg') and self.kg is not None and hasattr(self.kg, 'mcts'):
+                    # Get average hidden state as query representation
+                    avg_hidden = np.mean([n.hidden_state for n in self.nodes.values()], axis=0)
+                    query_magnitude = float(np.linalg.norm(avg_hidden))
+                    
+                    # Create query for SC-MCTS
+                    query = f"reasoning_depth_{int(query_magnitude * 100)}"
+                    
+                    # Run SC-MCTS search
+                    context = {"hidden_states": avg_hidden}
+                    paths, _ = self.kg.mcts.search(start_node_id=0, query=query, context=context)
+                    
+                    # Extract target from best path
+                    if paths and len(paths) > 0:
+                        best_path = paths[0]
+                        teacher_target_np = np.array(best_path.get('value', avg_hidden))
+                
+                # If teacher target generated, apply D-MMD and override output
+                if teacher_target_np is not None and self.optimizer_bridge is not None:
+                    # Convert to PyTorch tensor
+                    teacher_target_pt = torch.from_numpy(teacher_target_np).float().unsqueeze(1)
+                    
+                    # Align shapes defensively
+                    if teacher_target_pt.shape != moe_out_pt.shape:
+                        # Broadcast to match MoE output shape
+                        teacher_target_pt = teacher_target_pt.expand(-1, moe_out_pt.shape[1], -1)
+                    
+                    # Apply D-MMD gradients for just-in-time learning
+                    self.optimizer_bridge.apply_d_mmd_gradients(self._moe_output_pt, teacher_target_pt)
+                    
+                    # Override the continuous state with teacher target (detached for NumPy engine)
+                    moe_out_pt = teacher_target_pt.detach()
+                    print("[Cognition] Deep SC-MCTS Planning Complete. Student aligned with Teacher.")
+            # === END DYNAMIC COMPUTE SCALING ===
             
             # Preserve the computational graph for the Hebbian backward pass
             # (DO NOT detach here - we need the graph to flow to moe_layer parameters)
